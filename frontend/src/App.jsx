@@ -1,4 +1,17 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { Chess } from "chess.js";
+import wP from "./assets/pieces/wP.svg";
+import wN from "./assets/pieces/wN.svg";
+import wB from "./assets/pieces/wB.svg";
+import wR from "./assets/pieces/wR.svg";
+import wQ from "./assets/pieces/wQ.svg";
+import wK from "./assets/pieces/wK.svg";
+import bP from "./assets/pieces/bP.svg";
+import bN from "./assets/pieces/bN.svg";
+import bB from "./assets/pieces/bB.svg";
+import bR from "./assets/pieces/bR.svg";
+import bQ from "./assets/pieces/bQ.svg";
+import bK from "./assets/pieces/bK.svg";
 
 const DEFAULT_FEN =
   "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 2 3";
@@ -6,6 +19,21 @@ const DEFAULT_PROMPT = "why cant I play Nf3 here";
 
 const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"];
 const RANKS = ["8", "7", "6", "5", "4", "3", "2", "1"];
+
+const PIECE_IMAGES = {
+  P: wP,
+  N: wN,
+  B: wB,
+  R: wR,
+  Q: wQ,
+  K: wK,
+  p: bP,
+  n: bN,
+  b: bB,
+  r: bR,
+  q: bQ,
+  k: bK,
+};
 
 function parseFen(fen) {
   if (!fen) return Array.from({ length: 8 }, () => Array(8).fill(""));
@@ -40,20 +68,187 @@ function formatMoveLine(line) {
   return `${score}  ${moves}`.trim();
 }
 
+function squareCenter(square) {
+  const fileIndex = FILES.indexOf(square[0]);
+  const rankIndex = 8 - Number(square[1]);
+  return {
+    x: (fileIndex + 0.5) * 12.5,
+    y: (rankIndex + 0.5) * 12.5,
+  };
+}
+
 export default function App() {
-  const [fen, setFen] = useState(DEFAULT_FEN);
+  const gameRef = useRef(new Chess(DEFAULT_FEN));
+  const [gameFen, setGameFen] = useState(gameRef.current.fen());
+  const [fenInput, setFenInput] = useState(DEFAULT_FEN);
+  const [fenError, setFenError] = useState("");
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [moves, setMoves] = useState("");
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [activeSquare, setActiveSquare] = useState(null);
+  const [legalTargets, setLegalTargets] = useState([]);
+  const [dragFrom, setDragFrom] = useState(null);
+  const [arrows, setArrows] = useState([]);
+  const [arrowStart, setArrowStart] = useState(null);
+  const [arrowPreview, setArrowPreview] = useState(null);
 
-  const board = useMemo(() => parseFen(fen), [fen]);
+  const board = useMemo(() => parseFen(gameFen), [gameFen]);
+
+  const syncFen = (nextFen) => {
+    try {
+      const nextGame = new Chess();
+      const loaded = nextGame.load(nextFen);
+      if (!loaded) {
+        throw new Error("Invalid FEN");
+      }
+      gameRef.current = nextGame;
+      const updated = nextGame.fen();
+      setGameFen(updated);
+      setFenInput(updated);
+      setFenError("");
+      setActiveSquare(null);
+      setLegalTargets([]);
+      return true;
+    } catch (err) {
+      setFenError("Invalid FEN");
+      return false;
+    }
+  };
+
+  const setTargetsForSquare = (square) => {
+    const moves = gameRef.current.moves({ square, verbose: true });
+    setLegalTargets(moves.map((move) => move.to));
+  };
+
+  const attemptMove = (from, to) => {
+    const piece = gameRef.current.get(from);
+    if (!piece) {
+      return false;
+    }
+    const isPromotion =
+      piece.type === "p" && (to[1] === "8" || to[1] === "1");
+    const move = gameRef.current.move({
+      from,
+      to,
+      promotion: isPromotion ? "q" : undefined,
+    });
+    if (!move) {
+      return false;
+    }
+    const nextFen = gameRef.current.fen();
+    setGameFen(nextFen);
+    setFenInput(nextFen);
+    setActiveSquare(null);
+    setLegalTargets([]);
+    return true;
+  };
+
+  const handleSquareClick = (square) => {
+    const piece = gameRef.current.get(square);
+    if (activeSquare) {
+      if (square === activeSquare) {
+        setActiveSquare(null);
+        setLegalTargets([]);
+        return;
+      }
+      if (attemptMove(activeSquare, square)) {
+        return;
+      }
+    }
+    if (piece && piece.color === gameRef.current.turn()) {
+      setActiveSquare(square);
+      setTargetsForSquare(square);
+    } else {
+      setActiveSquare(null);
+      setLegalTargets([]);
+    }
+  };
+
+  const handleDragStart = (event, square) => {
+    const piece = gameRef.current.get(square);
+    if (!piece || piece.color !== gameRef.current.turn()) {
+      event.preventDefault();
+      return;
+    }
+    setDragFrom(square);
+  };
+
+  const handleDrop = (event, square) => {
+    event.preventDefault();
+    if (!dragFrom) {
+      return;
+    }
+    attemptMove(dragFrom, square);
+    setDragFrom(null);
+  };
+
+  const handleArrowStart = (event, square) => {
+    if (event.button !== 2) {
+      return;
+    }
+    event.preventDefault();
+    setArrowStart(square);
+    setArrowPreview(null);
+  };
+
+  const handleArrowEnd = (event, square) => {
+    if (event.button !== 2) {
+      return;
+    }
+    event.preventDefault();
+    if (!arrowStart || arrowStart === square) {
+      setArrowStart(null);
+      setArrowPreview(null);
+      return;
+    }
+    setArrows((prev) => {
+      const exists = prev.some(
+        (arrow) => arrow.from === arrowStart && arrow.to === square
+      );
+      if (exists) {
+        return prev.filter(
+          (arrow) => !(arrow.from === arrowStart && arrow.to === square)
+        );
+      }
+      return [...prev, { from: arrowStart, to: square }];
+    });
+    setArrowStart(null);
+    setArrowPreview(null);
+  };
+
+  const handleArrowHover = (event, square) => {
+    if (!arrowStart || (event.buttons & 2) === 0) {
+      return;
+    }
+    if (arrowStart === square) {
+      setArrowPreview(null);
+      return;
+    }
+    setArrowPreview({ from: arrowStart, to: square });
+  };
+
+  const clearArrows = () => {
+    setArrows([]);
+    setArrowStart(null);
+    setArrowPreview(null);
+  };
 
   const handleRun = async () => {
     setLoading(true);
     setError("");
     setResult(null);
+
+    const trimmedFen = fenInput.trim();
+    if (trimmedFen && trimmedFen !== gameRef.current.fen()) {
+      const ok = syncFen(trimmedFen);
+      if (!ok) {
+        setError("Invalid FEN");
+        setLoading(false);
+        return;
+      }
+    }
 
     const moveList = moves
       .split(/\s+/)
@@ -65,7 +260,7 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          fen,
+          fen: gameRef.current.fen(),
           moves: moveList.length ? moveList : null,
           prompt,
         }),
@@ -100,7 +295,7 @@ export default function App() {
           <div className="label">Active Question</div>
           <div className="hero-prompt">{prompt || "Your prompt"}</div>
           <div className="hero-meta">
-            <span>{fen ? "Custom FEN" : "Start position"}</span>
+            <span>{gameFen ? "Custom FEN" : "Start position"}</span>
             <span>{moves ? "With move list" : "No moves"}</span>
           </div>
         </div>
@@ -113,33 +308,108 @@ export default function App() {
             <p>Paste a FEN and optional moves, then run analysis.</p>
           </div>
 
-          <div className="board">
-            {board.map((row, rIdx) =>
-              row.map((piece, cIdx) => {
-                const light = (rIdx + cIdx) % 2 === 0;
-                const isWhite = piece && piece === piece.toUpperCase();
+          <div
+            className="board-wrapper"
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <svg className="arrow-layer" viewBox="0 0 100 100">
+              <defs>
+                <marker
+                  id="arrowhead"
+                  markerWidth="4"
+                  markerHeight="4"
+                  refX="3.2"
+                  refY="2"
+                  orient="auto"
+                >
+                  <polygon points="0 0, 4 2, 0 4" fill="#0b6b5f" />
+                </marker>
+              </defs>
+              {arrows.map((arrow) => {
+                const start = squareCenter(arrow.from);
+                const end = squareCenter(arrow.to);
                 return (
-                  <div
-                    key={`${rIdx}-${cIdx}`}
-                    className={`square ${light ? "light" : "dark"}`}
-                  >
-                    {cIdx === 0 && (
-                      <span className="coord coord-rank">{RANKS[rIdx]}</span>
-                    )}
-                    {rIdx === 7 && (
-                      <span className="coord coord-file">{FILES[cIdx]}</span>
-                    )}
-                    {piece && (
-                      <span
-                        className={`piece ${isWhite ? "white" : "black"}`}
-                      >
-                        {piece.toUpperCase()}
-                      </span>
-                    )}
-                  </div>
+                  <line
+                    key={`${arrow.from}-${arrow.to}`}
+                    x1={start.x}
+                    y1={start.y}
+                    x2={end.x}
+                    y2={end.y}
+                    stroke="#0b6b5f"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    markerEnd="url(#arrowhead)"
+                  />
                 );
-              })
-            )}
+              })}
+              {arrowPreview && (
+                <line
+                  x1={squareCenter(arrowPreview.from).x}
+                  y1={squareCenter(arrowPreview.from).y}
+                  x2={squareCenter(arrowPreview.to).x}
+                  y2={squareCenter(arrowPreview.to).y}
+                  stroke="#0b6b5f"
+                  strokeWidth="1.2"
+                  strokeLinecap="round"
+                  strokeOpacity="0.45"
+                  markerEnd="url(#arrowhead)"
+                />
+              )}
+            </svg>
+            <div className="board">
+              {board.map((row, rIdx) =>
+                row.map((piece, cIdx) => {
+                  const square = `${FILES[cIdx]}${RANKS[rIdx]}`;
+                  const light = (rIdx + cIdx) % 2 === 0;
+                  const isActive = square === activeSquare;
+                  const isTarget = legalTargets.includes(square);
+                  const pieceSrc = piece ? PIECE_IMAGES[piece] : null;
+                  const pieceObj = piece ? gameRef.current.get(square) : null;
+                  const isDraggable =
+                    pieceObj && pieceObj.color === gameRef.current.turn();
+
+                  return (
+                    <div
+                      key={`${rIdx}-${cIdx}`}
+                      className={`square ${light ? "light" : "dark"} ${
+                        isActive ? "active" : ""
+                      } ${isTarget ? "target" : ""}`}
+                      onClick={() => handleSquareClick(square)}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => handleDrop(event, square)}
+                      onMouseDown={(event) => handleArrowStart(event, square)}
+                      onMouseUp={(event) => handleArrowEnd(event, square)}
+                      onMouseEnter={(event) => handleArrowHover(event, square)}
+                    >
+                      {cIdx === 0 && (
+                        <span className="coord coord-rank">{RANKS[rIdx]}</span>
+                      )}
+                      {rIdx === 7 && (
+                        <span className="coord coord-file">{FILES[cIdx]}</span>
+                      )}
+                      {pieceSrc && (
+                        <img
+                          src={pieceSrc}
+                          alt=""
+                          className="piece-img"
+                          draggable={isDraggable}
+                          onDragStart={(event) =>
+                            handleDragStart(event, square)
+                          }
+                          onDragEnd={() => setDragFrom(null)}
+                        />
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+
+          <div className="board-actions">
+            <button type="button" className="ghost" onClick={clearArrows}>
+              Clear arrows
+            </button>
           </div>
 
           <div className="form">
@@ -147,10 +417,19 @@ export default function App() {
               FEN
               <textarea
                 rows={3}
-                value={fen}
-                onChange={(event) => setFen(event.target.value)}
+                value={fenInput}
+                onChange={(event) => setFenInput(event.target.value)}
+                placeholder="Paste a FEN string"
               />
             </label>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => syncFen(fenInput)}
+            >
+              Apply FEN to board
+            </button>
+            {fenError && <div className="error">{fenError}</div>}
             <label>
               Moves (SAN or UCI, space-separated)
               <input
