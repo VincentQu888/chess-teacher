@@ -3,13 +3,18 @@ import json
 import os
 import re
 import sys
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import chess
 import chess.engine
-import requests
+try:
+    from huggingface_hub import InferenceClient
+except ImportError:  # pragma: no cover - optional dependency
+    InferenceClient = None
 
 PIECE_VALUES = {
     chess.PAWN: 1,
@@ -27,7 +32,9 @@ CENTER_SQUARES = {
     chess.E5,
 }
 
-DEFAULT_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"
+DEFAULT_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
+TOKEN_FILE_NAME = "api_token.txt"
+DEFAULT_ROUTER_TIMEOUT = 60
 
 
 @dataclass
@@ -53,6 +60,19 @@ def find_engine_path(cli_path: Optional[str]) -> Optional[Path]:
         if candidate.exists():
             return candidate
     return None
+
+
+def load_hf_token() -> Optional[str]:
+    token = os.getenv("HUGGINGFACE_API_TOKEN") or os.getenv("HF_TOKEN")
+    if token:
+        return token
+
+    token_path = Path(__file__).resolve().parent / TOKEN_FILE_NAME
+    if not token_path.exists():
+        return None
+
+    content = token_path.read_text(encoding="utf-8").strip()
+    return content or None
 
 
 def parse_move(board: chess.Board, token: str) -> chess.Move:
@@ -284,38 +304,101 @@ def hf_generate(
     max_new_tokens: int = 512,
     temperature: float = 0.2,
 ) -> str:
-    token = os.getenv("HUGGINGFACE_API_TOKEN")
+    if InferenceClient is None:
+        raise RuntimeError("huggingface_hub is not installed. Run 'pip install huggingface_hub'.")
+    token = load_hf_token()
     if not token:
-        raise RuntimeError("Missing HUGGINGFACE_API_TOKEN environment variable")
+        raise RuntimeError("Missing HUGGINGFACE_API_TOKEN, HF_TOKEN, or api_token.txt")
 
-    url = f"https://api-inference.huggingface.co/models/{model}"
-    headers = {"Authorization": f"Bearer {token}"}
+    client_error = None
+    try:
+        try:
+            client = InferenceClient(api_key=token)
+        except TypeError:
+            client = InferenceClient(token=token)
+
+        if hasattr(client, "chat") and hasattr(client.chat, "completions"):
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=0.9,
+            )
+            message = completion.choices[0].message
+            text = getattr(message, "content", None)
+            if text is None and isinstance(message, dict):
+                text = message.get("content")
+            if text:
+                return str(text).strip()
+        else:
+            completion = client.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                model=model,
+                max_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=0.9,
+            )
+            choice = completion.choices[0]
+            message = getattr(choice, "message", None) or {}
+            text = getattr(message, "content", None)
+            if text is None and isinstance(message, dict):
+                text = message.get("content")
+            if text:
+                return str(text).strip()
+    except Exception as exc:
+        client_error = exc
+
+    url = "https://router.huggingface.co/v1/chat/completions"
+    timeout_seconds = int(os.getenv("HF_ROUTER_TIMEOUT", str(DEFAULT_ROUTER_TIMEOUT)))
     payload = {
-        "inputs": prompt,
-        "parameters": {
-            "max_new_tokens": max_new_tokens,
-            "temperature": temperature,
-            "top_p": 0.9,
-            "do_sample": True,
-        },
-        "options": {"wait_for_model": True},
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_new_tokens,
+        "temperature": temperature,
+        "top_p": 0.9,
+        "stream": False,
     }
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
 
-    response = requests.post(url, headers=headers, json=payload, timeout=120)
-    if response.status_code >= 400:
-        raise RuntimeError(f"HF error {response.status_code}: {response.text}")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8") if exc.fp else ""
+        raise RuntimeError(f"HF router error {exc.code}: {body}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Network error contacting Hugging Face router: {exc}") from exc
+    except TimeoutError as exc:
+        raise RuntimeError("Hugging Face router request timed out") from exc
+    except Exception as exc:
+        raise RuntimeError(f"Hugging Face router error: {exc}") from exc
 
-    data = response.json()
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Unexpected Hugging Face router response") from exc
+
     if isinstance(data, dict) and "error" in data:
-        raise RuntimeError(f"HF error: {data['error']}")
+        raise RuntimeError(f"HF router error: {data['error']}")
 
-    if not isinstance(data, list) or not data or "generated_text" not in data[0]:
-        raise RuntimeError("Unexpected Hugging Face response")
+    choices = data.get("choices", []) if isinstance(data, dict) else []
+    if not choices:
+        if client_error:
+            raise RuntimeError(f"HF client failed: {client_error}")
+        raise RuntimeError("Unexpected Hugging Face router response")
 
-    text = data[0]["generated_text"]
-    if text.startswith(prompt):
-        text = text[len(prompt) :]
-    return text.strip()
+    message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+    text = message.get("content") if isinstance(message, dict) else None
+    if not text:
+        raise RuntimeError("Unexpected Hugging Face router response")
+
+    return str(text).strip()
 
 
 def llm_candidate_lines(
@@ -331,7 +414,7 @@ def llm_candidate_lines(
         "You are a chess assistant. Return only valid JSON.\n"
         "Provide up to {max_candidates} candidate move lines that directly address the user question.\n"
         "Use SAN notation only, and only moves from the provided legal list.\n"
-        "Output schema: {\"candidates\": [{\"label\": \"...\", \"moves\": [\"Nf3\", \"Nc6\"]}]}.\n\n"
+        "Output schema: {{\"candidates\": [{{\"label\": \"...\", \"moves\": [\"Nf3\", \"Nc6\"]}}]}}.\n\n"
         "Position FEN: {fen}\n"
         "Side to move: {side}\n"
         "Legal moves (SAN): {legal}\n"
@@ -344,7 +427,11 @@ def llm_candidate_lines(
         question=prompt,
     )
 
-    raw = hf_generate(llm_prompt, model=model, max_new_tokens=384, temperature=0.3)
+    try:
+        raw = hf_generate(llm_prompt, model=model, max_new_tokens=192, temperature=0.3)
+    except RuntimeError as exc:
+        print(f"LLM candidate generation skipped: {exc}")
+        return []
     data = safe_json_loads(raw)
     if not data or "candidates" not in data:
         return []
@@ -358,6 +445,38 @@ def llm_candidate_lines(
         results.append((label, [str(m) for m in moves]))
 
     return results
+
+
+def fallback_explain(
+    board: chess.Board,
+    prompt: str,
+    engine_lines: List[LineResult],
+    candidate_lines: List[LineResult],
+    error: str,
+) -> str:
+    parts = [
+        "LLM unavailable; showing engine-only guidance.",
+        f"Reason: {error}",
+        f"Prompt: {prompt}",
+    ]
+
+    if engine_lines:
+        best = engine_lines[0]
+        parts.append(
+            "Best engine line: "
+            f"{format_score(best.score)} | {' '.join(best.moves)}"
+        )
+
+    if candidate_lines:
+        parts.append("Candidate line notes:")
+        for line in candidate_lines:
+            tags = format_tags_for_prompt(board, line.tags)
+            line_text = f"{line.label}: {format_score(line.score)} | {' '.join(line.moves)}"
+            if tags:
+                line_text += f" | tags: {tags}"
+            parts.append(line_text)
+
+    return "\n".join(parts)
 
 
 def extend_line_with_engine(
@@ -489,7 +608,7 @@ def llm_explain(
         candidates=candidate_text or "(none)",
     )
 
-    return hf_generate(expl_prompt, model=model, max_new_tokens=512, temperature=0.3)
+    return hf_generate(expl_prompt, model=model, max_new_tokens=256, temperature=0.3)
 
 
 def build_board(fen: Optional[str], moves: Optional[List[str]]) -> chess.Board:
@@ -567,8 +686,7 @@ def main() -> int:
     try:
         answer = llm_explain(board, args.prompt, engine_lines, candidate_lines, args.model)
     except RuntimeError as exc:
-        print(f"LLM error: {exc}")
-        return 1
+        answer = fallback_explain(board, args.prompt, engine_lines, candidate_lines, str(exc))
 
     print()
     print("LLM answer:")
