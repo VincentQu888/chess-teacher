@@ -62,6 +62,21 @@ function parseFen(fen) {
   });
 }
 
+function pawnCountError(fen) {
+  if (!fen) return "";
+  const boardPart = fen.split(" ")[0] || "";
+  let whitePawns = 0;
+  let blackPawns = 0;
+  for (const char of boardPart) {
+    if (char === "P") whitePawns += 1;
+    if (char === "p") blackPawns += 1;
+  }
+  if (whitePawns > 8 || blackPawns > 8) {
+    return `Too many pawns (${whitePawns} white, ${blackPawns} black). Max 8 per side.`;
+  }
+  return "";
+}
+
 function formatMoveLine(line) {
   const score = line.formatted_score || "?";
   const moves = line.moves?.join(" ") || "";
@@ -103,6 +118,13 @@ export default function App() {
       if (!loaded) {
         throw new Error("Invalid FEN");
       }
+
+      const pawnError = pawnCountError(nextFen);
+      if (pawnError) {
+        setFenError(pawnError);
+        return false;
+      }
+
       gameRef.current = nextGame;
       const updated = nextGame.fen();
       setGameFen(updated);

@@ -1,4 +1,5 @@
 python-chess>=1.999
 huggingface_hub>=0.25
-fastapi>=0.111
+fastapi>=0.109,<0.111
+pydantic<2
 uvicorn>=0.30
