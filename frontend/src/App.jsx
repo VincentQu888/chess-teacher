@@ -15,6 +15,8 @@ import bK from "./assets/pieces/bK.svg";
 
 const DEFAULT_FEN =
   "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 2 3";
+const START_FEN =
+  "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 const DEFAULT_PROMPT = "why cant I play Nf3 here";
 
 const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"];
@@ -257,6 +259,19 @@ export default function App() {
     setArrowPreview(null);
   };
 
+  const resetToStart = () => {
+    const nextGame = new Chess();
+    gameRef.current = nextGame;
+    const updated = nextGame.fen();
+    setGameFen(updated);
+    setFenInput(updated);
+    setFenError("");
+    setActiveSquare(null);
+    setLegalTargets([]);
+    setMoves("");
+    clearArrows();
+  };
+
   const handleRun = async () => {
     setLoading(true);
     setError("");
@@ -450,6 +465,9 @@ export default function App() {
               onClick={() => syncFen(fenInput)}
             >
               Apply FEN to board
+            </button>
+            <button type="button" className="ghost" onClick={resetToStart}>
+              Reset to starting position
             </button>
             {fenError && <div className="error">{fenError}</div>}
             <label>

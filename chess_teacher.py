@@ -576,6 +576,58 @@ def format_line_for_prompt(board: chess.Board, line: LineResult) -> str:
     return f"{line.label}: {format_score(line.score)} | {moves} | tags: {tags}"
 
 
+def response_needs_rewrite(text: str) -> bool:
+    if not text:
+        return True
+    sample = text.strip()
+    if len(sample) < 80:
+        return True
+    lowered = sample.lower()
+    if "candidate line" in lowered or "engine line" in lowered or "tags:" in lowered:
+        return True
+    list_lines = sum(
+        1
+        for line in sample.splitlines()
+        if re.match(r"^\s*(\d+[\).]|[-*])\s+", line)
+    )
+    return list_lines >= 2
+
+
+def basic_explain(
+    board: chess.Board,
+    prompt: str,
+    engine_lines: List[LineResult],
+    candidate_lines: List[LineResult],
+) -> str:
+    if not engine_lines:
+        return "No engine lines available to explain the position."
+
+    best = engine_lines[0]
+    parts = []
+    if best.moves:
+        parts.append(f"Best move is {best.moves[0]} ({format_score(best.score)}).")
+    else:
+        parts.append(f"Best line score is {format_score(best.score)}.")
+
+    if best.tags:
+        first_tags = best.tags[0].get("tags", [])
+        if first_tags:
+            parts.append(f"Key idea: {', '.join(first_tags[:3])}.")
+
+    if len(best.moves) > 1:
+        line = " ".join(best.moves[:4])
+        parts.append(f"Sample line: {line}.")
+
+    prompt_moves = find_prompt_moves(prompt, board)
+    if prompt_moves:
+        parts.append(
+            f"About {prompt_moves[0]}: it scores worse than the best line and"
+            " allows counterplay."
+        )
+
+    return " ".join(parts)
+
+
 def llm_explain(
     board: chess.Board,
     prompt: str,
@@ -591,10 +643,10 @@ def llm_explain(
     candidate_text = "\n".join(format_line_for_prompt(board, line) for line in candidate_lines)
 
     expl_prompt = (
-        "You are a chess coach. Use the engine lines and tactical tags to answer the question.\n"
+        "You are a chess coach. Answer with explanation only.\n"
         "Explain why the best move is best and why the questioned moves fail if applicable.\n"
-        "Mention concrete move order details up to 10 plies when useful.\n"
-        "Keep the answer focused and practical.\n\n"
+        "Avoid listing full move sequences or tags; mention at most one short line (up to 4 plies).\n"
+        "Keep the answer focused and practical in 2-4 short paragraphs.\n\n"
         "Position FEN: {fen}\n"
         "Side to move: {side}\n"
         "User question: {question}\n\n"
@@ -608,7 +660,35 @@ def llm_explain(
         candidates=candidate_text or "(none)",
     )
 
-    return hf_generate(expl_prompt, model=model, max_new_tokens=256, temperature=0.3)
+    response = hf_generate(expl_prompt, model=model, max_new_tokens=256, temperature=0.3)
+    if response_needs_rewrite(response):
+        rewrite_prompt = (
+            "Rewrite the answer into a concise explanation.\n"
+            "Do not list or enumerate move lines or tags.\n"
+            "Use 2-4 sentences. Mention at most one key line (up to 4 plies).\n"
+            "No headings.\n\n"
+            "Position FEN: {fen}\n"
+            "Side to move: {side}\n"
+            "User question: {question}\n\n"
+            "Engine top lines:\n{engine}\n\n"
+            "Candidate lines with tags:\n{candidates}\n"
+        ).format(
+            fen=board.fen(),
+            side="White" if board.turn == chess.WHITE else "Black",
+            question=prompt,
+            engine=engine_text or "(none)",
+            candidates=candidate_text or "(none)",
+        )
+        response = hf_generate(
+            rewrite_prompt,
+            model=model,
+            max_new_tokens=192,
+            temperature=0.2,
+        )
+        if response_needs_rewrite(response):
+            return basic_explain(board, prompt, engine_lines, candidate_lines)
+
+    return response
 
 
 def build_board(fen: Optional[str], moves: Optional[List[str]]) -> chess.Board:
