@@ -1,3 +1,7 @@
 /stockfish
 /api_token.txt
 /.venv
+/frontend/node_modules
+/frontend/dist
+/frontend/.env*
+/api/__pycache__
