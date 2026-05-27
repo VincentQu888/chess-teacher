@@ -51,14 +51,30 @@ def find_engine_path(cli_path: Optional[str]) -> Optional[Path]:
         path = Path(cli_path)
         return path if path.exists() else None
 
+    env_path = os.getenv("STOCKFISH_PATH")
+    if env_path:
+        path = Path(env_path)
+        if path.exists():
+            return path
+
     base = Path(__file__).resolve().parent
     candidates = [
         base / "stockfish" / "stockfish-windows-x86-64-avx2.exe",
         base / "stockfish-windows-x86-64-avx2.exe",
+        base / "stockfish",
+        Path("/opt/homebrew/bin/stockfish"),
+        Path("/usr/local/bin/stockfish"),
+        Path("/usr/bin/stockfish"),
     ]
     for candidate in candidates:
-        if candidate.exists():
+        if candidate.exists() and candidate.is_file():
             return candidate
+
+    from shutil import which
+
+    found = which("stockfish")
+    if found:
+        return Path(found)
     return None
 
 
@@ -142,15 +158,68 @@ def pinned_squares(board: chess.Board, color: chess.Color) -> List[int]:
     return squares
 
 
+def static_exchange_eval(
+    board: chess.Board, target_square: int, attacker_color: chess.Color
+) -> int:
+    """Static Exchange Evaluation: optimal net material won (in PIECE_VALUES units) by
+    `attacker_color` if they initiate a capture sequence on `target_square`. Returns 0
+    when no profitable capture exists — each side stops once continuing would lose
+    material. Handles x-ray attackers correctly because `attackers()` is re-queried
+    after each capture, exposing pieces that were previously blocked."""
+    target = board.piece_at(target_square)
+    if not target or target.color == attacker_color:
+        return 0
+
+    sim = board.copy()
+    gains: List[int] = []
+    side = attacker_color
+    current_value = PIECE_VALUES[target.piece_type]
+
+    while True:
+        attackers = sim.attackers(side, target_square)
+        if not attackers:
+            break
+
+        least_sq = min(
+            attackers,
+            key=lambda sq: PIECE_VALUES[sim.piece_at(sq).piece_type],
+        )
+        attacker_piece = sim.piece_at(least_sq)
+        if attacker_piece is None:
+            break
+
+        gains.append(current_value)
+        sim.remove_piece_at(least_sq)
+        sim.set_piece_at(target_square, attacker_piece)
+        current_value = PIECE_VALUES[attacker_piece.piece_type]
+        side = not side
+
+    result = 0
+    for gain in reversed(gains):
+        result = max(0, gain - result)
+    return result
+
+
 def creates_fork(board: chess.Board, square: int, mover_color: chess.Color) -> bool:
     piece = board.piece_at(square)
     if not piece:
         return False
 
+    # A "fork" by a piece that itself can be profitably captured isn't a real threat.
+    if static_exchange_eval(board, square, not mover_color) > 0:
+        return False
+
     targets = []
     for target_sq in board.attacks(square):
         target = board.piece_at(target_sq)
-        if target and target.color != mover_color:
+        if not target or target.color == mover_color:
+            continue
+        if target.piece_type == chess.KING:
+            # Attacking the king is always real (check).
+            targets.append(target)
+            continue
+        # Otherwise only count targets we could profitably grab.
+        if static_exchange_eval(board, target_sq, mover_color) > 0:
             targets.append(target)
 
     if not targets:
@@ -163,12 +232,377 @@ def creates_fork(board: chess.Board, square: int, mover_color: chess.Color) -> b
 
 
 def is_hanging(board: chess.Board, square: int, color: chess.Color) -> bool:
+    """True iff the opponent can win material by capturing the piece on `square`
+    according to Static Exchange Evaluation. A defended piece whose capture is
+    unprofitable for the attacker is NOT hanging."""
     piece = board.piece_at(square)
-    if not piece:
+    if not piece or piece.color != color:
         return False
-    attackers = board.attackers(not color, square)
-    defenders = board.attackers(color, square)
-    return len(attackers) > 0 and len(defenders) == 0
+    return static_exchange_eval(board, square, not color) > 0
+
+
+def is_tactical_position(board: chess.Board) -> bool:
+    """Position has tactical character that warrants deeper engine analysis."""
+    if board.is_check():
+        return True
+    capture_count = sum(1 for m in board.legal_moves if board.is_capture(m))
+    return capture_count >= 4
+
+
+def tactical_depth(board: chess.Board, base_depth: int, bonus: int = 4) -> int:
+    """Adaptive depth: spend more nodes in tactically volatile positions so the engine
+    score doesn't mislead the explainer about hanging pieces or exchange outcomes."""
+    return base_depth + (bonus if is_tactical_position(board) else 0)
+
+
+def position_facts(board: chess.Board) -> List[str]:
+    """Plain-language ground truth about which pieces are attacked, defended, or
+    hanging in the current position. Anchors the LLM in concrete attacker/defender
+    info so it doesn't misjudge a defended piece as hanging."""
+    hanging_facts: List[str] = []
+    contested_facts: List[str] = []
+
+    for color in (chess.WHITE, chess.BLACK):
+        color_name = "White" if color == chess.WHITE else "Black"
+        for square in chess.SQUARES:
+            piece = board.piece_at(square)
+            if not piece or piece.color != color or piece.piece_type == chess.KING:
+                continue
+            opponent = not color
+            attackers = board.attackers(opponent, square)
+            if not attackers:
+                continue
+
+            defenders = board.attackers(color, square)
+            sq_name = chess.square_name(square)
+            piece_name = chess.piece_name(piece.piece_type)
+
+            def describe(squares: chess.SquareSet) -> str:
+                items = []
+                for s in squares:
+                    p = board.piece_at(s)
+                    if p is None:
+                        continue
+                    items.append((PIECE_VALUES[p.piece_type], p.symbol().upper()))
+                items.sort(key=lambda x: x[0])
+                return "/".join(sym for _, sym in items) if items else "none"
+
+            att_str = describe(attackers)
+            def_str = describe(defenders)
+            see_gain = static_exchange_eval(board, square, opponent)
+
+            if see_gain > 0:
+                hanging_facts.append(
+                    f"{color_name} {piece_name} on {sq_name} is HANGING — "
+                    f"attackers {att_str}, defenders {def_str}; "
+                    f"opponent wins ~{see_gain} by capturing"
+                )
+            else:
+                contested_facts.append(
+                    f"{color_name} {piece_name} on {sq_name} is attacked but DEFENDED — "
+                    f"attackers {att_str}, defenders {def_str}; "
+                    f"capture is not profitable for opponent"
+                )
+
+    return hanging_facts + contested_facts
+
+
+def positional_facts(board: chess.Board) -> List[str]:
+    """Strategic/structural ground truth: pawn structure, king safety, color complexes,
+    open files, outposts, and recognized opening structures. Complements position_facts
+    (which is purely tactical) by giving the explainer concrete positional themes to
+    discuss — bishop trades, weak squares, plans tied to the pawn skeleton, etc."""
+    facts: List[str] = []
+
+    pawns: Dict[chess.Color, Dict[int, List[int]]] = {chess.WHITE: {}, chess.BLACK: {}}
+    for sq in chess.SQUARES:
+        piece = board.piece_at(sq)
+        if piece and piece.piece_type == chess.PAWN:
+            pawns[piece.color].setdefault(chess.square_file(sq), []).append(
+                chess.square_rank(sq)
+            )
+
+    def piece_at_is(sq: int, piece_type: int, color: chess.Color) -> bool:
+        p = board.piece_at(sq)
+        return p is not None and p.piece_type == piece_type and p.color == color
+
+    # --- Pawn structure: doubled, isolated, passed ---
+    for color in (chess.WHITE, chess.BLACK):
+        color_name = "White" if color == chess.WHITE else "Black"
+        own = pawns[color]
+        enemy = pawns[not color]
+
+        doubled = sorted(
+            chess.FILE_NAMES[f] for f, ranks in own.items() if len(ranks) >= 2
+        )
+        if doubled:
+            facts.append(
+                f"{color_name} has doubled pawns on file(s) {', '.join(doubled)}"
+            )
+
+        isolated = sorted(
+            chess.FILE_NAMES[f]
+            for f in own
+            if (f - 1) not in own and (f + 1) not in own
+        )
+        if isolated:
+            facts.append(
+                f"{color_name} has isolated pawn(s) on file(s) {', '.join(isolated)}"
+            )
+
+        passed = []
+        for f, ranks in own.items():
+            for r in ranks:
+                blocked = False
+                for ef in (f - 1, f, f + 1):
+                    if ef not in enemy:
+                        continue
+                    for er in enemy[ef]:
+                        if (color == chess.WHITE and er > r) or (
+                            color == chess.BLACK and er < r
+                        ):
+                            blocked = True
+                            break
+                    if blocked:
+                        break
+                if not blocked:
+                    passed.append(chess.square_name(chess.square(f, r)))
+        if passed:
+            facts.append(f"{color_name} has passed pawn(s) on {', '.join(passed)}")
+
+    # --- Open / semi-open files ---
+    files_with_pawns = set(pawns[chess.WHITE]) | set(pawns[chess.BLACK])
+    open_files = [chess.FILE_NAMES[f] for f in range(8) if f not in files_with_pawns]
+    if open_files:
+        facts.append(f"Open file(s) (no pawns): {', '.join(open_files)}")
+    for color in (chess.WHITE, chess.BLACK):
+        color_name = "White" if color == chess.WHITE else "Black"
+        semi = [
+            chess.FILE_NAMES[f]
+            for f in range(8)
+            if f not in pawns[color] and f in pawns[not color]
+        ]
+        if semi:
+            facts.append(f"{color_name} has semi-open file(s) {', '.join(semi)}")
+
+    # --- Bishops and color complex ---
+    for color in (chess.WHITE, chess.BLACK):
+        color_name = "White" if color == chess.WHITE else "Black"
+        bishop_squares = [
+            sq
+            for sq in chess.SQUARES
+            if piece_at_is(sq, chess.BISHOP, color)
+        ]
+        bishop_colors = {
+            (chess.square_file(sq) + chess.square_rank(sq)) % 2
+            for sq in bishop_squares
+        }
+        if len(bishop_squares) >= 2 and len(bishop_colors) == 2:
+            facts.append(f"{color_name} has the bishop pair")
+
+        light_pawns = 0
+        dark_pawns = 0
+        for f, ranks in pawns[color].items():
+            for r in ranks:
+                if (f + r) % 2 == 1:
+                    light_pawns += 1
+                else:
+                    dark_pawns += 1
+        total = light_pawns + dark_pawns
+        if total >= 5 and abs(light_pawns - dark_pawns) >= 3:
+            heavy = "light" if light_pawns > dark_pawns else "dark"
+            weak = "dark" if light_pawns > dark_pawns else "light"
+            facts.append(
+                f"{color_name} pawns sit mostly on {heavy} squares "
+                f"({light_pawns}L/{dark_pawns}D) — {weak} squares are weak in their "
+                f"camp; the {weak}-squared bishop is the more valuable minor piece "
+                f"(trade theirs, keep yours)"
+            )
+
+    # --- King safety ---
+    for color in (chess.WHITE, chess.BLACK):
+        color_name = "White" if color == chess.WHITE else "Black"
+        king_sq = board.king(color)
+        if king_sq is None:
+            continue
+        kf = chess.square_file(king_sq)
+        kr = chess.square_rank(king_sq)
+        home = 0 if color == chess.WHITE else 7
+        if kr == home and kf >= 6:
+            where = "castled kingside"
+        elif kr == home and kf <= 2:
+            where = "castled queenside"
+        elif kr == home and 3 <= kf <= 5:
+            where = "uncastled (center)"
+        else:
+            where = f"on {chess.square_name(king_sq)} (off back rank)"
+        facts.append(f"{color_name} king {where}")
+
+        if kr == home and kf >= 6:
+            shield_rank = 1 if color == chess.WHITE else 6
+            missing = []
+            for sf in (5, 6, 7):
+                if shield_rank not in pawns[color].get(sf, []):
+                    missing.append(chess.FILE_NAMES[sf])
+            if missing:
+                facts.append(
+                    f"{color_name} kingside pawn shield missing on "
+                    f"{', '.join(missing)}"
+                )
+
+    # --- Outpost squares (in opponent's half, defended by own pawn,
+    #     not challengeable by any enemy pawn) ---
+    for color in (chess.WHITE, chess.BLACK):
+        color_name = "White" if color == chess.WHITE else "Black"
+        outposts = []
+        for sq in chess.SQUARES:
+            f = chess.square_file(sq)
+            r = chess.square_rank(sq)
+            if f < 2 or f > 5:
+                continue
+            if color == chess.WHITE and r < 3:
+                continue
+            if color == chess.BLACK and r > 4:
+                continue
+            pawn_defends = False
+            for d in board.attackers(color, sq):
+                dp = board.piece_at(d)
+                if dp and dp.piece_type == chess.PAWN:
+                    pawn_defends = True
+                    break
+            if not pawn_defends:
+                continue
+            challengeable = False
+            for ef in (f - 1, f + 1):
+                if not 0 <= ef <= 7:
+                    continue
+                for er in pawns[not color].get(ef, []):
+                    if (color == chess.WHITE and er > r) or (
+                        color == chess.BLACK and er < r
+                    ):
+                        challengeable = True
+                        break
+                if challengeable:
+                    break
+            if not challengeable:
+                outposts.append(chess.square_name(sq))
+        if outposts:
+            facts.append(
+                f"{color_name} outpost square(s): {', '.join(outposts)} (pawn-defended, "
+                f"no enemy pawn can challenge — ideal for a knight)"
+            )
+
+    # --- Recognized opening structures ---
+    bp = pawns[chess.BLACK]
+    wp = pawns[chess.WHITE]
+
+    # Sicilian Dragon for Black: ...d6, ...g6, ...Bg7, c-pawn traded
+    if (
+        piece_at_is(chess.G7, chess.BISHOP, chess.BLACK)
+        and 5 in bp.get(6, [])
+        and 5 in bp.get(3, [])
+        and 2 not in bp
+    ):
+        facts.append(
+            "Structure: Sicilian Dragon (Black has ...d6, ...g6, ...Bg7, c-pawn "
+            "traded). Black's plan: keep the g7 dark-squared bishop and trade off "
+            "White's dark-squared bishop to monopolize the long h8-a1 diagonal and "
+            "the dark-square complex around White's king. White's plan: Yugoslav "
+            "attack (Be3, Qd2, O-O-O, h4-h5, Bh6 to trade the Dragon bishop) with "
+            "a kingside pawn storm."
+        )
+
+    # King's Indian Defense for Black: g7 bishop, ...d6, ...g6, ...e5
+    if (
+        piece_at_is(chess.G7, chess.BISHOP, chess.BLACK)
+        and 5 in bp.get(6, [])
+        and 5 in bp.get(3, [])
+        and 4 in bp.get(4, [])
+    ):
+        facts.append(
+            "Structure: King's Indian Defense (Black: ...d6, ...e5, ...g6, ...Bg7). "
+            "Black aims for ...f5 and a kingside attack while White expands on the "
+            "queenside. The g7-bishop is critical to Black's defense and attack; "
+            "Black should avoid trading it for a knight."
+        )
+
+    # White IQP on d4
+    if (
+        3 in wp.get(3, [])
+        and 2 not in wp
+        and 4 not in wp
+    ):
+        facts.append(
+            "Structure: White has an Isolated Queen Pawn (IQP) on d4. White plays "
+            "for piece activity, c5/e5 outposts for the knights, and kingside "
+            "attacks (Bd3+Qc2 battery, Re1). Black's plan: blockade with a knight "
+            "on d5 and head for an endgame where the d4-pawn becomes a target."
+        )
+
+    # Black IQP on d5
+    if (
+        4 in bp.get(3, [])
+        and 2 not in bp
+        and 4 not in bp
+    ):
+        facts.append(
+            "Structure: Black has an Isolated Queen Pawn (IQP) on d5. Mirror "
+            "of White IQP — Black plays for active pieces, White blockades and "
+            "targets the IQP in the endgame."
+        )
+
+    # French Defense closed center: White d4+e5, Black d5+e6
+    if (
+        3 in wp.get(3, [])
+        and 4 in wp.get(4, [])
+        and 4 in bp.get(3, [])
+        and 5 in bp.get(4, [])
+    ):
+        facts.append(
+            "Structure: French Defense, closed center (White d4+e5, Black d5+e6). "
+            "White has space and a kingside attack base anchored on e5. Black's "
+            "freeing breaks are ...c5 (queenside) and ...f6 (kingside). Black's "
+            "light-squared bishop on c8 is the classic 'French bad bishop'; "
+            "trading it off (often via ...b6/...Ba6 or ...Bd7-e8-h5) is a key plan."
+        )
+
+    # Hedgehog for Black: a6, b6, d6, e6, no c-pawn
+    if (
+        5 in bp.get(0, [])
+        and 5 in bp.get(1, [])
+        and 5 in bp.get(3, [])
+        and 5 in bp.get(4, [])
+        and 2 not in bp
+    ):
+        facts.append(
+            "Structure: Hedgehog (Black: a6/b6/d6/e6, c-pawn traded). Black holds "
+            "a flexible low-profile setup waiting to uncoil with ...b5 or ...d5. "
+            "White has space and must not allow either break under good conditions; "
+            "Black must avoid passive piece play."
+        )
+
+    # Caro-Kann / Slav skeleton for Black: ...c6 + ...d5
+    if 5 in bp.get(2, []) and 4 in bp.get(3, []):
+        facts.append(
+            "Structure: Black has the Caro-Kann/Slav pawn skeleton (...c6 + ...d5). "
+            "Solid but slightly passive; ...c5 is Black's typical freeing break."
+        )
+
+    # White Stonewall: c3, d4, e3, f4
+    if (
+        2 in wp.get(2, [])
+        and 3 in wp.get(3, [])
+        and 2 in wp.get(4, [])
+        and 3 in wp.get(5, [])
+    ):
+        facts.append(
+            "Structure: White Stonewall (c3/d4/e3/f4). White plays for a kingside "
+            "attack (Ne5 outpost, Bd3+Qh5). The e4 square is a permanent hole and "
+            "the c1-bishop is hard to develop — Black should aim for ...Ne4 and "
+            "exchange dark-squared bishops."
+        )
+
+    return facts
 
 
 def move_tags(board: chess.Board, move: chess.Move) -> List[str]:
@@ -177,12 +611,40 @@ def move_tags(board: chess.Board, move: chess.Move) -> List[str]:
     if not piece:
         return tags
 
-    if board.is_capture(move):
-        captured = board.piece_at(move.to_square)
-        if captured:
-            tags.append(f"captures {captured.symbol().upper()}")
+    is_capture = board.is_capture(move)
+    is_ep = is_capture and board.is_en_passant(move)
+    captured_piece = (
+        board.piece_at(move.to_square) if is_capture and not is_ep else None
+    )
+
+    opponent = not board.turn
+    before_pins = set(pinned_squares(board, opponent))
+
+    tmp = board.copy()
+    tmp.push(move)
+
+    if is_capture:
+        if is_ep:
+            captured_value = PIECE_VALUES[chess.PAWN]
+            captured_symbol = "P"
+        elif captured_piece:
+            captured_value = PIECE_VALUES[captured_piece.piece_type]
+            captured_symbol = captured_piece.symbol().upper()
         else:
-            tags.append("captures")
+            captured_value = 0
+            captured_symbol = None
+
+        # After our capture, what's the opponent's optimal recapture gain?
+        opp_gain = static_exchange_eval(tmp, move.to_square, not piece.color)
+        net_gain = captured_value - opp_gain
+
+        base = f"captures {captured_symbol}" if captured_symbol else "captures"
+        if net_gain < 0:
+            tags.append(f"{base} (losing exchange {net_gain})")
+        elif opp_gain > 0:
+            tags.append(f"{base} (winning exchange +{net_gain})")
+        else:
+            tags.append(base)
 
     if board.is_castling(move):
         tags.append("castle")
@@ -198,12 +660,6 @@ def move_tags(board: chess.Board, move: chess.Move) -> List[str]:
     if move.to_square in CENTER_SQUARES:
         tags.append("occupies center")
 
-    opponent = not board.turn
-    before_pins = set(pinned_squares(board, opponent))
-
-    tmp = board.copy()
-    tmp.push(move)
-
     after_pins = set(pinned_squares(tmp, opponent))
     if len(after_pins) > len(before_pins):
         tags.append("creates pin")
@@ -211,8 +667,11 @@ def move_tags(board: chess.Board, move: chess.Move) -> List[str]:
     if creates_fork(tmp, move.to_square, piece.color):
         tags.append("fork threat")
 
-    if is_hanging(tmp, move.to_square, piece.color):
-        tags.append("piece may be hanging")
+    # Hanging is only reported for non-captures; the capture tag above already
+    # surfaces losing exchanges, so we'd otherwise double-flag.
+    if not is_capture and is_hanging(tmp, move.to_square, piece.color):
+        see_loss = static_exchange_eval(tmp, move.to_square, not piece.color)
+        tags.append(f"hangs piece (drops {see_loss})")
 
     return tags
 
@@ -256,7 +715,8 @@ def engine_top_lines(
     top: int,
     pv_plies: int,
 ) -> List[LineResult]:
-    info_list = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=top)
+    actual_depth = tactical_depth(board, depth)
+    info_list = engine.analyse(board, chess.engine.Limit(depth=actual_depth), multipv=top)
     if isinstance(info_list, dict):
         info_list = [info_list]
 
@@ -513,7 +973,7 @@ def extend_line_with_engine(
     if remaining <= 0:
         return san_moves
 
-    info = engine.analyse(b, chess.engine.Limit(depth=depth))
+    info = engine.analyse(b, chess.engine.Limit(depth=tactical_depth(b, depth)))
     pv = info.get("pv", [])[:remaining]
     san_moves.extend(pv_to_san(b, pv))
     return san_moves
@@ -532,7 +992,7 @@ def evaluate_line(
         except ValueError:
             break
         b.push(move)
-    info = engine.analyse(b, chess.engine.Limit(depth=depth))
+    info = engine.analyse(b, chess.engine.Limit(depth=tactical_depth(b, depth)))
     return score_to_dict(info["score"].pov(board.turn))
 
 
@@ -668,21 +1128,43 @@ def llm_explain(
     )
 
     candidate_text = "\n".join(format_line_for_prompt(board, line) for line in candidate_lines)
+    facts = position_facts(board)
+    facts_text = "\n".join(f"- {f}" for f in facts) if facts else "- (no pieces under attack)"
+    strategic = positional_facts(board)
+    strategic_text = (
+        "\n".join(f"- {f}" for f in strategic)
+        if strategic
+        else "- (no notable structural features)"
+    )
 
     expl_prompt = (
         "You are a chess coach. Answer with explanation only.\n"
         "Explain why the best move is best and why the questioned moves fail if applicable.\n"
+        "When the position has structural character, weave in positional themes drawn "
+        "from the Strategic facts: pawn structure, color complexes, bishop trades, "
+        "open files, outposts, king safety, and any recognized opening structure (e.g., "
+        "Sicilian Dragon, French, IQP, King's Indian, Hedgehog). Connect concrete plans "
+        "to the structure (e.g., 'in this Dragon structure Black wants to keep the g7 "
+        "bishop and trade off White's dark-squared bishop to dominate the dark squares').\n"
+        "GROUND TRUTH: The Position facts and Strategic facts sections are computed exactly. "
+        "Only call a piece 'hanging' if it appears as HANGING in Position facts. Pieces "
+        "listed as DEFENDED are NOT hanging — capturing them loses material for the "
+        "attacker. Do not contradict these facts even if your intuition disagrees.\n"
         "Avoid listing full move sequences or tags; mention at most one short line (up to 4 plies).\n"
         "Keep the answer focused and practical in 2-4 short paragraphs.\n\n"
         "Position FEN: {fen}\n"
         "Side to move: {side}\n"
         "User question: {question}\n\n"
+        "Position facts (tactical ground truth):\n{facts}\n\n"
+        "Strategic facts (positional ground truth):\n{strategic}\n\n"
         "Engine top lines (score from side to move, positive is better):\n{engine}\n\n"
         "Candidate lines with tags:\n{candidates}\n"
     ).format(
         fen=board.fen(),
         side="White" if board.turn == chess.WHITE else "Black",
         question=prompt,
+        facts=facts_text,
+        strategic=strategic_text,
         engine=engine_text or "(none)",
         candidates=candidate_text or "(none)",
     )
@@ -693,16 +1175,25 @@ def llm_explain(
             "Rewrite the answer into a concise explanation.\n"
             "Do not list or enumerate move lines or tags.\n"
             "Use 2-4 sentences. Mention at most one key line (up to 4 plies).\n"
-            "No headings.\n\n"
+            "When relevant, include one positional theme drawn from the Strategic facts "
+            "(pawn structure, color complex, bishop trade, opening structure, outpost, "
+            "open file).\n"
+            "No headings.\n"
+            "Treat Position facts and Strategic facts as ground truth: only call a piece "
+            "'hanging' if listed as HANGING; pieces listed as DEFENDED are not hanging.\n\n"
             "Position FEN: {fen}\n"
             "Side to move: {side}\n"
             "User question: {question}\n\n"
+            "Position facts (tactical ground truth):\n{facts}\n\n"
+            "Strategic facts (positional ground truth):\n{strategic}\n\n"
             "Engine top lines:\n{engine}\n\n"
             "Candidate lines with tags:\n{candidates}\n"
         ).format(
             fen=board.fen(),
             side="White" if board.turn == chess.WHITE else "Black",
             question=prompt,
+            facts=facts_text,
+            strategic=strategic_text,
             engine=engine_text or "(none)",
             candidates=candidate_text or "(none)",
         )
@@ -733,10 +1224,27 @@ def llm_followup(
     )
     candidate_text = "\n".join(format_line_for_prompt(board, line) for line in candidate_lines)
     history_text = format_history_for_prompt(history)
+    facts = position_facts(board)
+    facts_text = "\n".join(f"- {f}" for f in facts) if facts else "- (no pieces under attack)"
+    strategic = positional_facts(board)
+    strategic_text = (
+        "\n".join(f"- {f}" for f in strategic)
+        if strategic
+        else "- (no notable structural features)"
+    )
 
     follow_prompt = (
         "You are a chess coach continuing a conversation.\n"
         "Answer the follow-up question with explanation only.\n"
+        "When the question is structural / strategic (e.g., plans, piece trades, pawn "
+        "breaks, who stands better long-term), draw on the Strategic facts: pawn "
+        "structure, color complexes, bishop trades, open files, outposts, king safety, "
+        "and any recognized opening structure (e.g., Sicilian Dragon, French, IQP, "
+        "King's Indian, Hedgehog). Tie concrete plans to the structure.\n"
+        "GROUND TRUTH: The Position facts and Strategic facts sections are computed "
+        "exactly. Only call a piece 'hanging' if it appears as HANGING in Position facts. "
+        "Pieces listed as DEFENDED are NOT hanging — capturing them loses material for "
+        "the attacker. Do not contradict these facts.\n"
         "Avoid listing full move sequences or tags; mention at most one short line (up to 4 plies).\n"
         "Keep the answer focused and practical in 2-4 short paragraphs.\n\n"
         "Position FEN: {fen}\n"
@@ -744,6 +1252,8 @@ def llm_followup(
         "Original question: {prompt}\n"
         "Conversation so far:\n{history}\n\n"
         "Follow-up question: {question}\n\n"
+        "Position facts (tactical ground truth):\n{facts}\n\n"
+        "Strategic facts (positional ground truth):\n{strategic}\n\n"
         "Engine top lines (score from side to move, positive is better):\n{engine}\n\n"
         "Candidate lines with tags:\n{candidates}\n"
     ).format(
@@ -752,6 +1262,8 @@ def llm_followup(
         prompt=prompt,
         history=history_text,
         question=question,
+        facts=facts_text,
+        strategic=strategic_text,
         engine=engine_text or "(none)",
         candidates=candidate_text or "(none)",
     )
@@ -762,12 +1274,19 @@ def llm_followup(
             "Rewrite the answer into a concise explanation.\n"
             "Do not list or enumerate move lines or tags.\n"
             "Use 2-4 sentences. Mention at most one key line (up to 4 plies).\n"
-            "No headings.\n\n"
+            "When relevant, include one positional theme drawn from the Strategic facts "
+            "(pawn structure, color complex, bishop trade, opening structure, outpost, "
+            "open file).\n"
+            "No headings.\n"
+            "Treat Position facts and Strategic facts as ground truth: only call a piece "
+            "'hanging' if listed as HANGING; pieces listed as DEFENDED are not hanging.\n\n"
             "Position FEN: {fen}\n"
             "Side to move: {side}\n"
             "Original question: {prompt}\n"
             "Conversation so far:\n{history}\n\n"
             "Follow-up question: {question}\n\n"
+            "Position facts (tactical ground truth):\n{facts}\n\n"
+            "Strategic facts (positional ground truth):\n{strategic}\n\n"
             "Engine top lines:\n{engine}\n\n"
             "Candidate lines with tags:\n{candidates}\n"
         ).format(
@@ -776,6 +1295,8 @@ def llm_followup(
             prompt=prompt,
             history=history_text,
             question=question,
+            facts=facts_text,
+            strategic=strategic_text,
             engine=engine_text or "(none)",
             candidates=candidate_text or "(none)",
         )
@@ -850,7 +1371,23 @@ def main() -> int:
     print(f"Prompt: {args.prompt}")
     print()
 
-    print(f"Top engine lines (depth {args.depth}, {args.pv_plies} plies):")
+    facts = position_facts(board)
+    if facts:
+        print("Position facts:")
+        for fact in facts:
+            print(f"- {fact}")
+        print()
+
+    strategic = positional_facts(board)
+    if strategic:
+        print("Strategic facts:")
+        for fact in strategic:
+            print(f"- {fact}")
+        print()
+
+    effective_depth = tactical_depth(board, args.depth)
+    depth_note = f"{args.depth}" if effective_depth == args.depth else f"{args.depth} → {effective_depth} (tactical)"
+    print(f"Top engine lines (depth {depth_note}, {args.pv_plies} plies):")
     for idx, line in enumerate(engine_lines, start=1):
         print(f"{idx}) {format_score(line.score)}: {' '.join(line.moves)}")
 
