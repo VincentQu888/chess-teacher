@@ -1300,6 +1300,124 @@ def build_candidate_lines(
     return results
 
 
+def extract_hypothetical_candidates(
+    text: str,
+    board: chess.Board,
+    engine_lines: List[LineResult],
+    max_lookahead: int = 2,
+) -> List[Tuple[List[str], str]]:
+    """Find moves mentioned in `text` that could be analyzed as hypotheticals.
+    Returns (prefix_moves, san_move) tuples. Considers the current position and
+    up to `max_lookahead` plies down the engine's #1 line so questions like
+    'what about e5?' (asked when White's e5 only becomes legal after Black moves
+    the f-pawn knight) still resolve to the right branch."""
+    candidates: List[Tuple[List[str], str]] = []
+    seen: set = set()
+
+    for san in find_prompt_moves(text, board):
+        key = ((), san)
+        if key not in seen:
+            candidates.append(([], san))
+            seen.add(key)
+
+    if engine_lines and engine_lines[0].moves:
+        b = board.copy()
+        prefix: List[str] = []
+        for mv_san in engine_lines[0].moves[:max_lookahead]:
+            try:
+                mv = parse_move(b, mv_san)
+            except ValueError:
+                break
+            prefix.append(b.san(mv))
+            b.push(mv)
+            for san in find_prompt_moves(text, b):
+                key = (tuple(prefix), san)
+                if key not in seen:
+                    candidates.append((list(prefix), san))
+                    seen.add(key)
+
+    return candidates
+
+
+def hypothetical_line(
+    board: chess.Board,
+    engine: chess.engine.SimpleEngine,
+    prefix_moves: List[str],
+    user_move: str,
+    depth: int,
+    pv_plies: int,
+) -> Optional[LineResult]:
+    """Play `prefix_moves` + `user_move`, let the engine fill the continuation,
+    and return a LineResult scored from the original side-to-move's POV. Returns
+    None if any move in the chain is illegal."""
+    b = board.copy()
+    full_moves: List[str] = []
+    for mv_san in list(prefix_moves) + [user_move]:
+        try:
+            mv = parse_move(b, mv_san)
+        except ValueError:
+            return None
+        full_moves.append(b.san(mv))
+        b.push(mv)
+
+    remaining = pv_plies - len(full_moves)
+    if remaining > 0:
+        info = engine.analyse(b, chess.engine.Limit(depth=tactical_depth(b, depth)))
+        pv = info.get("pv", [])[:remaining]
+        full_moves.extend(pv_to_san(b, pv))
+
+    score = evaluate_line(board, engine, depth, full_moves)
+    tags = line_tags(board, full_moves)
+
+    if prefix_moves:
+        prefix_text = " ".join(prefix_moves)
+        label = f"What if after {prefix_text} the response is {user_move}"
+    else:
+        label = f"What if {user_move}"
+
+    return LineResult(
+        label=label,
+        moves=full_moves,
+        score=score,
+        tags=tags,
+        source="hypothetical",
+    )
+
+
+def build_hypothetical_lines(
+    board: chess.Board,
+    engine: chess.engine.SimpleEngine,
+    question: str,
+    engine_lines: List[LineResult],
+    depth: int,
+    pv_plies: int,
+    max_lines: int = 4,
+) -> List[LineResult]:
+    """For each move mentioned in `question`, build a hypothetical LineResult so
+    the LLM has actual engine evaluation of the user's idea rather than
+    speculating about lines the engine never showed it."""
+    candidates = extract_hypothetical_candidates(question, board, engine_lines)
+    if not candidates:
+        return []
+
+    existing: set = set()
+    for line in engine_lines:
+        for i in range(len(line.moves)):
+            existing.add((tuple(line.moves[:i]), line.moves[i]))
+
+    results: List[LineResult] = []
+    for prefix, mv_san in candidates:
+        if (tuple(prefix), mv_san) in existing:
+            continue
+        line = hypothetical_line(board, engine, prefix, mv_san, depth, pv_plies)
+        if line is None:
+            continue
+        results.append(line)
+        if len(results) >= max_lines:
+            break
+    return results
+
+
 def format_moves_with_sides(board: chess.Board, moves: List[str]) -> str:
     """Annotate each move with the side that plays it, using PGN numbering.
     Example: 'Black: 6...Nf6 -> White: 7.Bc4 -> Black: 7...O-O -> White: 8.Bb3'.
@@ -1535,12 +1653,16 @@ def llm_followup(
     engine_lines: List[LineResult],
     candidate_lines: List[LineResult],
     model: str,
+    hypothetical_lines: Optional[List[LineResult]] = None,
 ) -> str:
     engine_text = "\n".join(
         f"{idx + 1}) {format_score(line.score)}: {format_moves_with_sides(board, line.moves)}"
         for idx, line in enumerate(engine_lines)
     )
     candidate_text = "\n".join(format_line_for_prompt(board, line) for line in candidate_lines)
+    hypothetical_text = "\n".join(
+        format_line_for_prompt(board, line) for line in (hypothetical_lines or [])
+    )
     history_text = format_history_for_prompt(history)
     ground_truth = build_ground_truth_block(board)
     anchor = best_move_anchor(board, engine_lines)
@@ -1553,13 +1675,18 @@ def llm_followup(
         "{anchor}\n\n"
         "TASK: Answer the follow-up about THIS position ({side} to move). Do NOT "
         "propose moves for the other side first. Do NOT invent moves; only reference "
-        "moves that appear in the Engine top lines or Candidate lines below. Do NOT "
-        "claim a piece attacks another piece unless that relationship appears in the "
-        "Piece attacks section. Do NOT claim a piece is on a square unless it appears "
-        "in Board state.\n"
+        "moves that appear in the Engine top lines, Candidate lines, or Hypothetical "
+        "lines below. Do NOT claim a piece attacks another piece unless that "
+        "relationship appears in the Piece attacks section. Do NOT claim a piece is "
+        "on a square unless it appears in Board state.\n"
         "SIDES IN ENGINE LINES: each move is explicitly labeled 'White:' or 'Black:'. "
         "The first move belongs to {side}; the second to {opponent}; alternating. Do "
         "NOT claim {side} plays a move that is labeled '{opponent}:' or vice versa.\n"
+        "HYPOTHETICAL LINES: when the user asks 'what about move X' or 'isn't X bad', "
+        "the Hypothetical lines section already shows the engine's response IF that "
+        "move were played. Use those lines as your factual basis. Compare the "
+        "hypothetical's evaluation against the engine's top line to explain whether "
+        "the user's idea works.\n"
         "When the question is structural/strategic (plans, piece trades, pawn breaks, "
         "long-term assessment), draw on the Strategic facts.\n"
         "GROUND TRUTH: Every section below the 'Ground truth' header is computed "
@@ -1575,7 +1702,8 @@ def llm_followup(
         "Follow-up question: {question}\n\n"
         "=== Ground truth ===\n{ground_truth}\n\n"
         "Engine top lines (score from side to move, positive is better):\n{engine}\n\n"
-        "Candidate lines with tags:\n{candidates}\n"
+        "Candidate lines with tags:\n{candidates}\n\n"
+        "Hypothetical lines (engine evaluation if the user's mentioned move were played):\n{hypotheticals}\n"
     ).format(
         anchor=anchor,
         side=side_name,
@@ -1587,6 +1715,7 @@ def llm_followup(
         ground_truth=ground_truth,
         engine=engine_text or "(none)",
         candidates=candidate_text or "(none)",
+        hypotheticals=hypothetical_text or "(none)",
     )
 
     response = hf_generate(follow_prompt, model=model, max_new_tokens=384, temperature=0.3)
@@ -1607,7 +1736,8 @@ def llm_followup(
             "Follow-up question: {question}\n\n"
             "=== Ground truth ===\n{ground_truth}\n\n"
             "Engine top lines:\n{engine}\n\n"
-            "Candidate lines with tags:\n{candidates}\n"
+            "Candidate lines with tags:\n{candidates}\n\n"
+            "Hypothetical lines:\n{hypotheticals}\n"
         ).format(
             anchor=anchor,
             side=side_name,
@@ -1618,6 +1748,7 @@ def llm_followup(
             ground_truth=ground_truth,
             engine=engine_text or "(none)",
             candidates=candidate_text or "(none)",
+            hypotheticals=hypothetical_text or "(none)",
         )
         response = hf_generate(
             rewrite_prompt,

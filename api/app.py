@@ -158,6 +158,24 @@ def chat(request: ChatRequest) -> dict:
     candidate_lines = [dict_to_line(line, "candidate") for line in request.candidate_lines]
     history = [message_to_dict(msg) for msg in request.history]
 
+    hypothetical_lines: list = []
+    engine_path = ct.find_engine_path(None)
+    if engine_path:
+        try:
+            with ct.chess.engine.SimpleEngine.popen_uci(str(engine_path)) as engine:
+                engine.configure({"Threads": 4})
+                hypothetical_lines = ct.build_hypothetical_lines(
+                    board,
+                    engine,
+                    request.question,
+                    engine_lines,
+                    depth=14,
+                    pv_plies=8,
+                    max_lines=4,
+                )
+        except Exception:
+            hypothetical_lines = []
+
     try:
         answer = ct.llm_followup(
             board,
@@ -167,6 +185,7 @@ def chat(request: ChatRequest) -> dict:
             engine_lines,
             candidate_lines,
             model,
+            hypothetical_lines=hypothetical_lines,
         )
         error = None
     except RuntimeError as exc:
@@ -179,4 +198,8 @@ def chat(request: ChatRequest) -> dict:
             error,
         )
 
-    return {"answer": answer, "error": error}
+    return {
+        "answer": answer,
+        "error": error,
+        "hypothetical_lines": [line_to_dict(line) for line in hypothetical_lines],
+    }
