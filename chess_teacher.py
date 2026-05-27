@@ -32,7 +32,7 @@ CENTER_SQUARES = {
     chess.E5,
 }
 
-DEFAULT_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
+DEFAULT_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 TOKEN_FILE_NAME = "api_token.txt"
 DEFAULT_ROUTER_TIMEOUT = 60
 
@@ -605,6 +605,264 @@ def positional_facts(board: chess.Board) -> List[str]:
     return facts
 
 
+def piece_placement_summary(board: chess.Board) -> str:
+    """Plain-language listing of where each side's pieces stand. Small LLMs cannot
+    reliably parse FEN, so this gives them the same information in readable form."""
+    order = [chess.KING, chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT, chess.PAWN]
+    singular = {
+        chess.KING: "King", chess.QUEEN: "Queen", chess.ROOK: "Rook",
+        chess.BISHOP: "Bishop", chess.KNIGHT: "Knight", chess.PAWN: "Pawn",
+    }
+    plural = {
+        chess.KING: "Kings", chess.QUEEN: "Queens", chess.ROOK: "Rooks",
+        chess.BISHOP: "Bishops", chess.KNIGHT: "Knights", chess.PAWN: "Pawns",
+    }
+    out = []
+    for color in (chess.WHITE, chess.BLACK):
+        color_name = "White" if color == chess.WHITE else "Black"
+        by_type: Dict[int, List[str]] = {}
+        for sq in chess.SQUARES:
+            p = board.piece_at(sq)
+            if p and p.color == color:
+                by_type.setdefault(p.piece_type, []).append(chess.square_name(sq))
+        parts = []
+        for pt in order:
+            squares = sorted(by_type.get(pt, []))
+            if not squares:
+                continue
+            label = plural[pt] if len(squares) > 1 else singular[pt]
+            parts.append(f"{label} {'/'.join(squares)}")
+        out.append(f"{color_name}: {'; '.join(parts)}")
+    return "\n".join(out)
+
+
+def attack_relations(board: chess.Board) -> List[str]:
+    """Enumerate every piece-on-piece attack currently on the board. Anchors the LLM
+    in concrete attack relationships so it can't invent ones that don't exist
+    (e.g., 'e4 attacks c6' when in fact e4 attacks only the empty squares d5/f5).
+    Empty-square attacks are intentionally omitted to keep the listing tight."""
+    rels: List[str] = []
+    for sq in chess.SQUARES:
+        p = board.piece_at(sq)
+        if not p:
+            continue
+        targets = []
+        for t in board.attacks(sq):
+            tp = board.piece_at(t)
+            if tp and tp.color != p.color:
+                targets.append(f"{tp.symbol().upper()}{chess.square_name(t)}")
+        if not targets:
+            continue
+        color_name = "White" if p.color == chess.WHITE else "Black"
+        piece_name = chess.piece_name(p.piece_type)
+        rels.append(
+            f"{color_name} {piece_name} on {chess.square_name(sq)} attacks "
+            f"{', '.join(targets)}"
+        )
+    return rels
+
+
+def defense_relations(board: chess.Board) -> List[str]:
+    """For each piece, list which friendly pieces defend it. Mirror of attack_relations —
+    together they form the complete attacker/defender graph for the position."""
+    rels: List[str] = []
+    for sq in chess.SQUARES:
+        p = board.piece_at(sq)
+        if not p:
+            continue
+        defenders = []
+        for d in board.attackers(p.color, sq):
+            if d == sq:
+                continue
+            dp = board.piece_at(d)
+            if dp:
+                defenders.append(f"{dp.symbol().upper()}{chess.square_name(d)}")
+        if not defenders:
+            continue
+        color_name = "White" if p.color == chess.WHITE else "Black"
+        piece_name = chess.piece_name(p.piece_type)
+        rels.append(
+            f"{color_name} {piece_name} on {chess.square_name(sq)} is defended by "
+            f"{', '.join(defenders)}"
+        )
+    return rels
+
+
+def pin_descriptions(board: chess.Board) -> List[str]:
+    """Absolutely-pinned pieces (cannot move without exposing the king). Walks the
+    pin line from king through pinned piece to identify the pinner."""
+    items: List[str] = []
+    for color in (chess.WHITE, chess.BLACK):
+        color_name = "White" if color == chess.WHITE else "Black"
+        king_sq = board.king(color)
+        if king_sq is None:
+            continue
+        for square in chess.SQUARES:
+            piece = board.piece_at(square)
+            if not piece or piece.color != color:
+                continue
+            if not board.is_pinned(color, square):
+                continue
+            df = chess.square_file(square) - chess.square_file(king_sq)
+            dr = chess.square_rank(square) - chess.square_rank(king_sq)
+            if df != 0:
+                df //= abs(df)
+            if dr != 0:
+                dr //= abs(dr)
+            cf = chess.square_file(square) + df
+            cr = chess.square_rank(square) + dr
+            pinner_sq = None
+            while 0 <= cf <= 7 and 0 <= cr <= 7:
+                cs = chess.square(cf, cr)
+                cp = board.piece_at(cs)
+                if cp:
+                    if cp.color != color:
+                        pinner_sq = cs
+                    break
+                cf += df
+                cr += dr
+            piece_name = chess.piece_name(piece.piece_type)
+            if pinner_sq is not None:
+                pinner = board.piece_at(pinner_sq)
+                items.append(
+                    f"{color_name} {piece_name} on {chess.square_name(square)} is "
+                    f"PINNED against the king by "
+                    f"{pinner.symbol().upper()}{chess.square_name(pinner_sq)}"
+                )
+            else:
+                items.append(
+                    f"{color_name} {piece_name} on {chess.square_name(square)} is PINNED"
+                )
+    return items
+
+
+def existing_forks(board: chess.Board) -> List[str]:
+    """Pieces already on the board that fork two or more valuable enemy targets.
+    Distinct from move_tags' 'fork threat' which flags hypothetical moves."""
+    items: List[str] = []
+    for sq in chess.SQUARES:
+        p = board.piece_at(sq)
+        if not p:
+            continue
+        if not creates_fork(board, sq, p.color):
+            continue
+        targets = []
+        for t in board.attacks(sq):
+            tp = board.piece_at(t)
+            if tp and tp.color != p.color:
+                targets.append(f"{tp.symbol().upper()}{chess.square_name(t)}")
+        if len(targets) < 2:
+            continue
+        color_name = "White" if p.color == chess.WHITE else "Black"
+        piece_name = chess.piece_name(p.piece_type)
+        items.append(
+            f"{color_name} {piece_name} on {chess.square_name(sq)} FORKS "
+            f"{', '.join(targets)}"
+        )
+    return items
+
+
+def king_zone_threats(board: chess.Board) -> List[str]:
+    """Squares adjacent to each king that the opponent currently attacks. A quick
+    proxy for king-attack pressure."""
+    items: List[str] = []
+    for color in (chess.WHITE, chess.BLACK):
+        color_name = "White" if color == chess.WHITE else "Black"
+        king_sq = board.king(color)
+        if king_sq is None:
+            continue
+        attacked = []
+        kf = chess.square_file(king_sq)
+        kr = chess.square_rank(king_sq)
+        for df in (-1, 0, 1):
+            for dr in (-1, 0, 1):
+                if df == 0 and dr == 0:
+                    continue
+                nf, nr = kf + df, kr + dr
+                if not (0 <= nf <= 7 and 0 <= nr <= 7):
+                    continue
+                ns = chess.square(nf, nr)
+                if board.attackers(not color, ns):
+                    attacked.append(chess.square_name(ns))
+        if attacked:
+            items.append(
+                f"{color_name} king zone — squares next to "
+                f"K{chess.square_name(king_sq)} attacked by opponent: "
+                f"{', '.join(attacked)}"
+            )
+    return items
+
+
+def position_meta(board: chess.Board) -> List[str]:
+    """Position-level state: check, castling rights, en passant, material balance,
+    and 50-move clock proximity."""
+    items: List[str] = []
+
+    if board.is_check():
+        side = "White" if board.turn == chess.WHITE else "Black"
+        items.append(f"{side} is in CHECK")
+
+    rights = []
+    if board.has_kingside_castling_rights(chess.WHITE):
+        rights.append("White O-O")
+    if board.has_queenside_castling_rights(chess.WHITE):
+        rights.append("White O-O-O")
+    if board.has_kingside_castling_rights(chess.BLACK):
+        rights.append("Black O-O")
+    if board.has_queenside_castling_rights(chess.BLACK):
+        rights.append("Black O-O-O")
+    items.append(
+        f"Castling rights: {', '.join(rights)}" if rights else "Castling rights: none"
+    )
+
+    if board.ep_square is not None:
+        items.append(f"En passant target square: {chess.square_name(board.ep_square)}")
+
+    white_mat = 0
+    black_mat = 0
+    for sq in chess.SQUARES:
+        p = board.piece_at(sq)
+        if not p or p.piece_type == chess.KING:
+            continue
+        v = PIECE_VALUES[p.piece_type]
+        if p.color == chess.WHITE:
+            white_mat += v
+        else:
+            black_mat += v
+    diff = white_mat - black_mat
+    if diff > 0:
+        items.append(f"Material balance: White +{diff} (W{white_mat} vs B{black_mat})")
+    elif diff < 0:
+        items.append(f"Material balance: Black +{-diff} (W{white_mat} vs B{black_mat})")
+    else:
+        items.append(f"Material balance: equal ({white_mat} vs {black_mat})")
+
+    if board.halfmove_clock >= 30:
+        items.append(
+            f"Halfmove clock: {board.halfmove_clock}/50 (approaching 50-move rule)"
+        )
+
+    return items
+
+
+def best_move_anchor(board: chess.Board, engine_lines: List["LineResult"]) -> str:
+    """One-line callout naming the engine's #1 move with score, ply notation, and a
+    short continuation. Pinned at the top of the prompt to keep the LLM from
+    inventing its own 'best move'."""
+    side = "White" if board.turn == chess.WHITE else "Black"
+    if not engine_lines or not engine_lines[0].moves:
+        return f"ENGINE'S BEST MOVE for {side}: (no engine output available)"
+    best = engine_lines[0]
+    move_number = board.fullmove_number
+    prefix = f"{move_number}." if board.turn == chess.WHITE else f"{move_number}..."
+    continuation = " ".join(best.moves[:4])
+    return (
+        f"ENGINE'S BEST MOVE for {side}: {prefix}{best.moves[0]} "
+        f"(eval {format_score(best.score)} from {side}'s perspective; "
+        f"sample continuation: {continuation})"
+    )
+
+
 def move_tags(board: chess.Board, move: chess.Move) -> List[str]:
     tags = []
     piece = board.piece_at(move.from_square)
@@ -1063,6 +1321,39 @@ def format_history_for_prompt(history: List[Dict[str, str]], max_items: int = 6)
     return "\n".join(lines) if lines else "(none)"
 
 
+def build_ground_truth_block(board: chess.Board) -> str:
+    """Assemble every deterministic board-state section into one block. Order is
+    chosen to put the most concrete (placement, attacks, defenses) before the more
+    interpretive (tactical motifs, structural assessment)."""
+
+    def bullets(items: List[str], empty_msg: str) -> str:
+        if not items:
+            return f"- {empty_msg}"
+        return "\n".join(f"- {x}" for x in items)
+
+    placement = piece_placement_summary(board)
+    meta_text = bullets(position_meta(board), "(no special state)")
+    attacks_text = bullets(attack_relations(board), "no pieces currently attack any enemy piece")
+    defenses_text = bullets(defense_relations(board), "no pieces currently defend a friendly piece")
+    pins_text = bullets(pin_descriptions(board), "no pieces are pinned")
+    forks_text = bullets(existing_forks(board), "no pieces currently fork enemy targets")
+    king_zone_text = bullets(king_zone_threats(board), "neither king has attacked squares adjacent to it")
+    position_facts_text = bullets(position_facts(board), "no pieces under attack")
+    strategic_text = bullets(positional_facts(board), "no notable structural features")
+
+    return (
+        f"Board state:\n{placement}\n\n"
+        f"Position meta (check, castling, en passant, material):\n{meta_text}\n\n"
+        f"Piece attacks (each piece → enemy pieces it currently attacks):\n{attacks_text}\n\n"
+        f"Piece defenses (each piece → friendly pieces defending it):\n{defenses_text}\n\n"
+        f"Pinned pieces:\n{pins_text}\n\n"
+        f"Existing forks on the board:\n{forks_text}\n\n"
+        f"King-zone threats:\n{king_zone_text}\n\n"
+        f"Position facts (tactical: hanging vs defended):\n{position_facts_text}\n\n"
+        f"Strategic facts (positional structure):\n{strategic_text}"
+    )
+
+
 def response_needs_rewrite(text: str) -> bool:
     if not text:
         return True
@@ -1128,79 +1419,77 @@ def llm_explain(
     )
 
     candidate_text = "\n".join(format_line_for_prompt(board, line) for line in candidate_lines)
-    facts = position_facts(board)
-    facts_text = "\n".join(f"- {f}" for f in facts) if facts else "- (no pieces under attack)"
-    strategic = positional_facts(board)
-    strategic_text = (
-        "\n".join(f"- {f}" for f in strategic)
-        if strategic
-        else "- (no notable structural features)"
-    )
+    ground_truth = build_ground_truth_block(board)
+    anchor = best_move_anchor(board, engine_lines)
+    side_name = "White" if board.turn == chess.WHITE else "Black"
 
     expl_prompt = (
-        "You are a chess coach. Answer with explanation only.\n"
-        "Explain why the best move is best and why the questioned moves fail if applicable.\n"
-        "When the position has structural character, weave in positional themes drawn "
-        "from the Strategic facts: pawn structure, color complexes, bishop trades, "
-        "open files, outposts, king safety, and any recognized opening structure (e.g., "
-        "Sicilian Dragon, French, IQP, King's Indian, Hedgehog). Connect concrete plans "
-        "to the structure (e.g., 'in this Dragon structure Black wants to keep the g7 "
-        "bishop and trade off White's dark-squared bishop to dominate the dark squares').\n"
-        "GROUND TRUTH: The Position facts and Strategic facts sections are computed exactly. "
-        "Only call a piece 'hanging' if it appears as HANGING in Position facts. Pieces "
-        "listed as DEFENDED are NOT hanging — capturing them loses material for the "
-        "attacker. Do not contradict these facts even if your intuition disagrees.\n"
+        "You are a chess coach. Answer with explanation only.\n\n"
+        "{anchor}\n\n"
+        "TASK: Explain why this specific engine move is best for {side}, and why any "
+        "alternative the user asked about fails if applicable. Do NOT propose moves "
+        "for the other side first — the position has already been reached. Do NOT "
+        "invent moves; only reference moves that appear in the Engine top lines or "
+        "Candidate lines below. Do NOT claim a piece attacks another piece unless "
+        "that relationship appears in the Piece attacks section. Do NOT claim a piece "
+        "is on a square unless it appears in Board state.\n"
+        "When the position has structural character, weave in positional themes from "
+        "the Strategic facts: pawn structure, color complexes, bishop trades, open "
+        "files, outposts, king safety, and any recognized opening structure (Sicilian "
+        "Dragon, French, IQP, King's Indian, Hedgehog, etc.).\n"
+        "GROUND TRUTH: Every section below the 'Ground truth' header is computed "
+        "exactly. Only call a piece 'hanging' if it appears as HANGING in Position "
+        "facts. Pieces listed as DEFENDED are NOT hanging. Do not contradict these "
+        "facts.\n"
         "Avoid listing full move sequences or tags; mention at most one short line (up to 4 plies).\n"
         "Keep the answer focused and practical in 2-4 short paragraphs.\n\n"
         "Position FEN: {fen}\n"
         "Side to move: {side}\n"
         "User question: {question}\n\n"
-        "Position facts (tactical ground truth):\n{facts}\n\n"
-        "Strategic facts (positional ground truth):\n{strategic}\n\n"
+        "=== Ground truth ===\n{ground_truth}\n\n"
         "Engine top lines (score from side to move, positive is better):\n{engine}\n\n"
         "Candidate lines with tags:\n{candidates}\n"
     ).format(
+        anchor=anchor,
+        side=side_name,
         fen=board.fen(),
-        side="White" if board.turn == chess.WHITE else "Black",
         question=prompt,
-        facts=facts_text,
-        strategic=strategic_text,
+        ground_truth=ground_truth,
         engine=engine_text or "(none)",
         candidates=candidate_text or "(none)",
     )
 
-    response = hf_generate(expl_prompt, model=model, max_new_tokens=256, temperature=0.3)
+    response = hf_generate(expl_prompt, model=model, max_new_tokens=384, temperature=0.3)
     if response_needs_rewrite(response):
         rewrite_prompt = (
-            "Rewrite the answer into a concise explanation.\n"
+            "Rewrite the answer into a concise explanation.\n\n"
+            "{anchor}\n\n"
             "Do not list or enumerate move lines or tags.\n"
             "Use 2-4 sentences. Mention at most one key line (up to 4 plies).\n"
-            "When relevant, include one positional theme drawn from the Strategic facts "
-            "(pawn structure, color complex, bishop trade, opening structure, outpost, "
-            "open file).\n"
-            "No headings.\n"
-            "Treat Position facts and Strategic facts as ground truth: only call a piece "
-            "'hanging' if listed as HANGING; pieces listed as DEFENDED are not hanging.\n\n"
+            "Explain the engine's best move named above; do not invent other moves.\n"
+            "Do not claim attacks, defenses, pins, forks, or piece placements that "
+            "aren't in the Ground truth sections.\n"
+            "When relevant, include one positional theme drawn from the Strategic facts.\n"
+            "No headings.\n\n"
             "Position FEN: {fen}\n"
             "Side to move: {side}\n"
             "User question: {question}\n\n"
-            "Position facts (tactical ground truth):\n{facts}\n\n"
-            "Strategic facts (positional ground truth):\n{strategic}\n\n"
+            "=== Ground truth ===\n{ground_truth}\n\n"
             "Engine top lines:\n{engine}\n\n"
             "Candidate lines with tags:\n{candidates}\n"
         ).format(
+            anchor=anchor,
+            side=side_name,
             fen=board.fen(),
-            side="White" if board.turn == chess.WHITE else "Black",
             question=prompt,
-            facts=facts_text,
-            strategic=strategic_text,
+            ground_truth=ground_truth,
             engine=engine_text or "(none)",
             candidates=candidate_text or "(none)",
         )
         response = hf_generate(
             rewrite_prompt,
             model=model,
-            max_new_tokens=192,
+            max_new_tokens=256,
             temperature=0.2,
         )
         if response_needs_rewrite(response):
@@ -1224,27 +1513,26 @@ def llm_followup(
     )
     candidate_text = "\n".join(format_line_for_prompt(board, line) for line in candidate_lines)
     history_text = format_history_for_prompt(history)
-    facts = position_facts(board)
-    facts_text = "\n".join(f"- {f}" for f in facts) if facts else "- (no pieces under attack)"
-    strategic = positional_facts(board)
-    strategic_text = (
-        "\n".join(f"- {f}" for f in strategic)
-        if strategic
-        else "- (no notable structural features)"
-    )
+    ground_truth = build_ground_truth_block(board)
+    anchor = best_move_anchor(board, engine_lines)
+    side_name = "White" if board.turn == chess.WHITE else "Black"
 
     follow_prompt = (
         "You are a chess coach continuing a conversation.\n"
-        "Answer the follow-up question with explanation only.\n"
-        "When the question is structural / strategic (e.g., plans, piece trades, pawn "
-        "breaks, who stands better long-term), draw on the Strategic facts: pawn "
-        "structure, color complexes, bishop trades, open files, outposts, king safety, "
-        "and any recognized opening structure (e.g., Sicilian Dragon, French, IQP, "
-        "King's Indian, Hedgehog). Tie concrete plans to the structure.\n"
-        "GROUND TRUTH: The Position facts and Strategic facts sections are computed "
-        "exactly. Only call a piece 'hanging' if it appears as HANGING in Position facts. "
-        "Pieces listed as DEFENDED are NOT hanging — capturing them loses material for "
-        "the attacker. Do not contradict these facts.\n"
+        "Answer the follow-up question with explanation only.\n\n"
+        "{anchor}\n\n"
+        "TASK: Answer the follow-up about THIS position ({side} to move). Do NOT "
+        "propose moves for the other side first. Do NOT invent moves; only reference "
+        "moves that appear in the Engine top lines or Candidate lines below. Do NOT "
+        "claim a piece attacks another piece unless that relationship appears in the "
+        "Piece attacks section. Do NOT claim a piece is on a square unless it appears "
+        "in Board state.\n"
+        "When the question is structural/strategic (plans, piece trades, pawn breaks, "
+        "long-term assessment), draw on the Strategic facts.\n"
+        "GROUND TRUTH: Every section below the 'Ground truth' header is computed "
+        "exactly. Only call a piece 'hanging' if it appears as HANGING in Position "
+        "facts. Pieces listed as DEFENDED are NOT hanging. Do not contradict these "
+        "facts.\n"
         "Avoid listing full move sequences or tags; mention at most one short line (up to 4 plies).\n"
         "Keep the answer focused and practical in 2-4 short paragraphs.\n\n"
         "Position FEN: {fen}\n"
@@ -1252,51 +1540,48 @@ def llm_followup(
         "Original question: {prompt}\n"
         "Conversation so far:\n{history}\n\n"
         "Follow-up question: {question}\n\n"
-        "Position facts (tactical ground truth):\n{facts}\n\n"
-        "Strategic facts (positional ground truth):\n{strategic}\n\n"
+        "=== Ground truth ===\n{ground_truth}\n\n"
         "Engine top lines (score from side to move, positive is better):\n{engine}\n\n"
         "Candidate lines with tags:\n{candidates}\n"
     ).format(
+        anchor=anchor,
+        side=side_name,
         fen=board.fen(),
-        side="White" if board.turn == chess.WHITE else "Black",
         prompt=prompt,
         history=history_text,
         question=question,
-        facts=facts_text,
-        strategic=strategic_text,
+        ground_truth=ground_truth,
         engine=engine_text or "(none)",
         candidates=candidate_text or "(none)",
     )
 
-    response = hf_generate(follow_prompt, model=model, max_new_tokens=256, temperature=0.3)
+    response = hf_generate(follow_prompt, model=model, max_new_tokens=384, temperature=0.3)
     if response_needs_rewrite(response):
         rewrite_prompt = (
-            "Rewrite the answer into a concise explanation.\n"
+            "Rewrite the answer into a concise explanation.\n\n"
+            "{anchor}\n\n"
             "Do not list or enumerate move lines or tags.\n"
             "Use 2-4 sentences. Mention at most one key line (up to 4 plies).\n"
-            "When relevant, include one positional theme drawn from the Strategic facts "
-            "(pawn structure, color complex, bishop trade, opening structure, outpost, "
-            "open file).\n"
-            "No headings.\n"
-            "Treat Position facts and Strategic facts as ground truth: only call a piece "
-            "'hanging' if listed as HANGING; pieces listed as DEFENDED are not hanging.\n\n"
+            "Do not invent moves, attacks, defenses, pins, forks, or piece placements; "
+            "every concrete claim must trace back to the Ground truth sections.\n"
+            "When relevant, include one positional theme drawn from the Strategic facts.\n"
+            "No headings.\n\n"
             "Position FEN: {fen}\n"
             "Side to move: {side}\n"
             "Original question: {prompt}\n"
             "Conversation so far:\n{history}\n\n"
             "Follow-up question: {question}\n\n"
-            "Position facts (tactical ground truth):\n{facts}\n\n"
-            "Strategic facts (positional ground truth):\n{strategic}\n\n"
+            "=== Ground truth ===\n{ground_truth}\n\n"
             "Engine top lines:\n{engine}\n\n"
             "Candidate lines with tags:\n{candidates}\n"
         ).format(
+            anchor=anchor,
+            side=side_name,
             fen=board.fen(),
-            side="White" if board.turn == chess.WHITE else "Black",
             prompt=prompt,
             history=history_text,
             question=question,
-            facts=facts_text,
-            strategic=strategic_text,
+            ground_truth=ground_truth,
             engine=engine_text or "(none)",
             candidates=candidate_text or "(none)",
         )
