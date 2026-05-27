@@ -855,7 +855,7 @@ def best_move_anchor(board: chess.Board, engine_lines: List["LineResult"]) -> st
     best = engine_lines[0]
     move_number = board.fullmove_number
     prefix = f"{move_number}." if board.turn == chess.WHITE else f"{move_number}..."
-    continuation = " ".join(best.moves[:4])
+    continuation = format_moves_with_sides(board, best.moves[:4])
     return (
         f"ENGINE'S BEST MOVE for {side}: {prefix}{best.moves[0]} "
         f"(eval {format_score(best.score)} from {side}'s perspective; "
@@ -1300,10 +1300,30 @@ def build_candidate_lines(
     return results
 
 
+def format_moves_with_sides(board: chess.Board, moves: List[str]) -> str:
+    """Annotate each move with the side that plays it, using PGN numbering.
+    Example: 'Black: 6...Nf6 -> White: 7.Bc4 -> Black: 7...O-O -> White: 8.Bb3'.
+    This is critical so the LLM never confuses which side plays a given move
+    in an engine continuation."""
+
+    turn = board.turn
+    fullmove = board.fullmove_number
+    parts: List[str] = []
+    for mv in moves:
+        side = "White" if turn == chess.WHITE else "Black"
+        if turn == chess.WHITE:
+            parts.append(f"{side}: {fullmove}.{mv}")
+        else:
+            parts.append(f"{side}: {fullmove}...{mv}")
+            fullmove += 1
+        turn = not turn
+    return " -> ".join(parts)
+
+
 def format_line_for_prompt(board: chess.Board, line: LineResult) -> str:
-    moves = " ".join(line.moves)
+    annotated = format_moves_with_sides(board, line.moves)
     tags = format_tags_for_prompt(board, line.tags)
-    return f"{line.label}: {format_score(line.score)} | {moves} | tags: {tags}"
+    return f"{line.label}: {format_score(line.score)} | {annotated} | tags: {tags}"
 
 
 def format_history_for_prompt(history: List[Dict[str, str]], max_items: int = 6) -> str:
@@ -1414,7 +1434,7 @@ def llm_explain(
     model: str,
 ) -> str:
     engine_text = "\n".join(
-        f"{idx + 1}) {format_score(line.score)}: {' '.join(line.moves)}"
+        f"{idx + 1}) {format_score(line.score)}: {format_moves_with_sides(board, line.moves)}"
         for idx, line in enumerate(engine_lines)
     )
 
@@ -1422,6 +1442,7 @@ def llm_explain(
     ground_truth = build_ground_truth_block(board)
     anchor = best_move_anchor(board, engine_lines)
     side_name = "White" if board.turn == chess.WHITE else "Black"
+    opponent_name = "Black" if board.turn == chess.WHITE else "White"
 
     expl_prompt = (
         "You are a chess coach. Answer with explanation only.\n\n"
@@ -1433,6 +1454,13 @@ def llm_explain(
         "Candidate lines below. Do NOT claim a piece attacks another piece unless "
         "that relationship appears in the Piece attacks section. Do NOT claim a piece "
         "is on a square unless it appears in Board state.\n"
+        "SIDES IN ENGINE LINES: each move in every engine/candidate line is explicitly "
+        "labeled 'White:' or 'Black:'. The first move belongs to {side} ({side} is to "
+        "move); the second move belongs to {opponent}; and so on alternating. Do NOT "
+        "claim {side} plays a move that is labeled '{opponent}:' or vice versa. When "
+        "you mention a move from a line, attribute it to whichever side the label "
+        "shows — for example, a move labeled 'White: Bc4' is WHITE's bishop, not "
+        "Black's, even when {side} = Black.\n"
         "When the position has structural character, weave in positional themes from "
         "the Strategic facts: pawn structure, color complexes, bishop trades, open "
         "files, outposts, king safety, and any recognized opening structure (Sicilian "
@@ -1452,6 +1480,7 @@ def llm_explain(
     ).format(
         anchor=anchor,
         side=side_name,
+        opponent=opponent_name,
         fen=board.fen(),
         question=prompt,
         ground_truth=ground_truth,
@@ -1508,7 +1537,7 @@ def llm_followup(
     model: str,
 ) -> str:
     engine_text = "\n".join(
-        f"{idx + 1}) {format_score(line.score)}: {' '.join(line.moves)}"
+        f"{idx + 1}) {format_score(line.score)}: {format_moves_with_sides(board, line.moves)}"
         for idx, line in enumerate(engine_lines)
     )
     candidate_text = "\n".join(format_line_for_prompt(board, line) for line in candidate_lines)
@@ -1516,6 +1545,7 @@ def llm_followup(
     ground_truth = build_ground_truth_block(board)
     anchor = best_move_anchor(board, engine_lines)
     side_name = "White" if board.turn == chess.WHITE else "Black"
+    opponent_name = "Black" if board.turn == chess.WHITE else "White"
 
     follow_prompt = (
         "You are a chess coach continuing a conversation.\n"
@@ -1527,6 +1557,9 @@ def llm_followup(
         "claim a piece attacks another piece unless that relationship appears in the "
         "Piece attacks section. Do NOT claim a piece is on a square unless it appears "
         "in Board state.\n"
+        "SIDES IN ENGINE LINES: each move is explicitly labeled 'White:' or 'Black:'. "
+        "The first move belongs to {side}; the second to {opponent}; alternating. Do "
+        "NOT claim {side} plays a move that is labeled '{opponent}:' or vice versa.\n"
         "When the question is structural/strategic (plans, piece trades, pawn breaks, "
         "long-term assessment), draw on the Strategic facts.\n"
         "GROUND TRUTH: Every section below the 'Ground truth' header is computed "
@@ -1546,6 +1579,7 @@ def llm_followup(
     ).format(
         anchor=anchor,
         side=side_name,
+        opponent=opponent_name,
         fen=board.fen(),
         prompt=prompt,
         history=history_text,
