@@ -104,6 +104,10 @@ export default function App() {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [chatMessages, setChatMessages] = useState([]);
+  const [followUp, setFollowUp] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatError, setChatError] = useState("");
   const [activeSquare, setActiveSquare] = useState(null);
   const [legalTargets, setLegalTargets] = useState([]);
   const [dragFrom, setDragFrom] = useState(null);
@@ -114,14 +118,12 @@ export default function App() {
   const board = useMemo(() => parseFen(gameFen), [gameFen]);
 
   const syncFen = (nextFen) => {
+    const trimmedFen = nextFen.trim();
     try {
       const nextGame = new Chess();
-      const loaded = nextGame.load(nextFen);
-      if (!loaded) {
-        throw new Error("Invalid FEN");
-      }
+      nextGame.load(trimmedFen);
 
-      const pawnError = pawnCountError(nextFen);
+      const pawnError = pawnCountError(trimmedFen);
       if (pawnError) {
         setFenError(pawnError);
         return false;
@@ -276,6 +278,7 @@ export default function App() {
     setLoading(true);
     setError("");
     setResult(null);
+    setChatError("");
 
     const trimmedFen = fenInput.trim();
     if (trimmedFen && trimmedFen !== gameRef.current.fen()) {
@@ -310,10 +313,67 @@ export default function App() {
 
       const data = await response.json();
       setResult(data);
+      const freshChat = [];
+      const trimmedPrompt = prompt.trim();
+      if (trimmedPrompt) {
+        freshChat.push({ role: "user", content: trimmedPrompt });
+      }
+      if (data.llm_answer) {
+        freshChat.push({ role: "assistant", content: data.llm_answer });
+      }
+      setChatMessages(freshChat);
+      setFollowUp("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Request failed");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleFollowUp = async () => {
+    if (!result) {
+      return;
+    }
+    const question = followUp.trim();
+    if (!question) {
+      return;
+    }
+    setChatLoading(true);
+    setChatError("");
+
+    try {
+      const response = await fetch("http://localhost:8000/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fen: result.fen || gameRef.current.fen(),
+          prompt,
+          question,
+          history: chatMessages,
+          engine_lines: result.engine_lines || [],
+          candidate_lines: result.candidate_lines || [],
+        }),
+      });
+
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(message || "Request failed");
+      }
+
+      const data = await response.json();
+      setChatMessages((prev) => [
+        ...prev,
+        { role: "user", content: question },
+        { role: "assistant", content: data.answer || "" },
+      ]);
+      setFollowUp("");
+      if (data.error) {
+        setChatError(data.error);
+      }
+    } catch (err) {
+      setChatError(err instanceof Error ? err.message : "Request failed");
+    } finally {
+      setChatLoading(false);
     }
   };
 
@@ -553,6 +613,39 @@ export default function App() {
                 {result.llm_error && (
                   <p className="muted">{result.llm_error}</p>
                 )}
+              </div>
+
+              <div className="result-card wide chat">
+                <h3>Coach chat</h3>
+                <div className="chat-messages">
+                  {chatMessages.length ? (
+                    chatMessages.map((message, idx) => (
+                      <div
+                        key={`chat-${idx}`}
+                        className={`chat-message ${message.role}`}
+                      >
+                        {message.content}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="muted">Ask a follow-up question to begin.</div>
+                  )}
+                </div>
+                <div className="chat-input-row">
+                  <input
+                    value={followUp}
+                    onChange={(event) => setFollowUp(event.target.value)}
+                    placeholder="Ask a follow-up question"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleFollowUp}
+                    disabled={!result || chatLoading || !followUp.trim()}
+                  >
+                    {chatLoading ? "Sending..." : "Send"}
+                  </button>
+                </div>
+                {chatError && <p className="muted">{chatError}</p>}
               </div>
             </div>
           )}

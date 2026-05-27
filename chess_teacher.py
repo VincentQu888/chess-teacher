@@ -113,6 +113,17 @@ def format_score(score: Dict[str, int]) -> str:
     return f"{score.get('cp', 0) / 100:.2f}"
 
 
+def score_key(score: Dict[str, int]) -> int:
+    mate = score.get("mate")
+    if mate is not None:
+        if mate > 0:
+            return 100000 - mate
+        if mate < 0:
+            return -100000 - mate
+        return 0
+    return int(score.get("cp", 0))
+
+
 def pv_to_san(board: chess.Board, moves: List[chess.Move]) -> List[str]:
     b = board.copy()
     san_moves = []
@@ -567,6 +578,7 @@ def build_candidate_lines(
             )
         )
 
+    results.sort(key=lambda line: score_key(line.score), reverse=True)
     return results
 
 
@@ -576,11 +588,26 @@ def format_line_for_prompt(board: chess.Board, line: LineResult) -> str:
     return f"{line.label}: {format_score(line.score)} | {moves} | tags: {tags}"
 
 
+def format_history_for_prompt(history: List[Dict[str, str]], max_items: int = 6) -> str:
+    if not history:
+        return "(none)"
+    trimmed = history[-max_items:]
+    lines = []
+    for entry in trimmed:
+        role = (entry.get("role") or "user").strip().lower()
+        content = (entry.get("content") or "").strip()
+        if not content:
+            continue
+        label = "Coach" if role in {"assistant", "coach"} else "User"
+        lines.append(f"{label}: {content}")
+    return "\n".join(lines) if lines else "(none)"
+
+
 def response_needs_rewrite(text: str) -> bool:
     if not text:
         return True
     sample = text.strip()
-    if len(sample) < 80:
+    if len(sample) < 60:
         return True
     lowered = sample.lower()
     if "candidate line" in lowered or "engine line" in lowered or "tags:" in lowered:
@@ -687,6 +714,79 @@ def llm_explain(
         )
         if response_needs_rewrite(response):
             return basic_explain(board, prompt, engine_lines, candidate_lines)
+
+    return response
+
+
+def llm_followup(
+    board: chess.Board,
+    prompt: str,
+    question: str,
+    history: List[Dict[str, str]],
+    engine_lines: List[LineResult],
+    candidate_lines: List[LineResult],
+    model: str,
+) -> str:
+    engine_text = "\n".join(
+        f"{idx + 1}) {format_score(line.score)}: {' '.join(line.moves)}"
+        for idx, line in enumerate(engine_lines)
+    )
+    candidate_text = "\n".join(format_line_for_prompt(board, line) for line in candidate_lines)
+    history_text = format_history_for_prompt(history)
+
+    follow_prompt = (
+        "You are a chess coach continuing a conversation.\n"
+        "Answer the follow-up question with explanation only.\n"
+        "Avoid listing full move sequences or tags; mention at most one short line (up to 4 plies).\n"
+        "Keep the answer focused and practical in 2-4 short paragraphs.\n\n"
+        "Position FEN: {fen}\n"
+        "Side to move: {side}\n"
+        "Original question: {prompt}\n"
+        "Conversation so far:\n{history}\n\n"
+        "Follow-up question: {question}\n\n"
+        "Engine top lines (score from side to move, positive is better):\n{engine}\n\n"
+        "Candidate lines with tags:\n{candidates}\n"
+    ).format(
+        fen=board.fen(),
+        side="White" if board.turn == chess.WHITE else "Black",
+        prompt=prompt,
+        history=history_text,
+        question=question,
+        engine=engine_text or "(none)",
+        candidates=candidate_text or "(none)",
+    )
+
+    response = hf_generate(follow_prompt, model=model, max_new_tokens=256, temperature=0.3)
+    if response_needs_rewrite(response):
+        rewrite_prompt = (
+            "Rewrite the answer into a concise explanation.\n"
+            "Do not list or enumerate move lines or tags.\n"
+            "Use 2-4 sentences. Mention at most one key line (up to 4 plies).\n"
+            "No headings.\n\n"
+            "Position FEN: {fen}\n"
+            "Side to move: {side}\n"
+            "Original question: {prompt}\n"
+            "Conversation so far:\n{history}\n\n"
+            "Follow-up question: {question}\n\n"
+            "Engine top lines:\n{engine}\n\n"
+            "Candidate lines with tags:\n{candidates}\n"
+        ).format(
+            fen=board.fen(),
+            side="White" if board.turn == chess.WHITE else "Black",
+            prompt=prompt,
+            history=history_text,
+            question=question,
+            engine=engine_text or "(none)",
+            candidates=candidate_text or "(none)",
+        )
+        response = hf_generate(
+            rewrite_prompt,
+            model=model,
+            max_new_tokens=192,
+            temperature=0.2,
+        )
+        if response_needs_rewrite(response):
+            return basic_explain(board, question, engine_lines, candidate_lines)
 
     return response
 

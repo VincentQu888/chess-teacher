@@ -20,6 +20,21 @@ class AnalyzeRequest(BaseModel):
     model: Optional[str] = None
 
 
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    fen: Optional[str] = None
+    prompt: str
+    question: str
+    history: List[ChatMessage] = []
+    engine_lines: List[dict] = []
+    candidate_lines: List[dict] = []
+    model: Optional[str] = None
+
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -39,6 +54,22 @@ def line_to_dict(line: ct.LineResult) -> dict:
         "tags": line.tags,
         "source": line.source,
     }
+
+
+def dict_to_line(data: dict, source: str) -> ct.LineResult:
+    return ct.LineResult(
+        label=str(data.get("label", source)),
+        moves=list(data.get("moves", [])),
+        score=data.get("score", {"cp": 0}),
+        tags=list(data.get("tags", [])),
+        source=source,
+    )
+
+
+def message_to_dict(message: ChatMessage) -> dict:
+    if hasattr(message, "model_dump"):
+        return message.model_dump()
+    return message.dict()
 
 
 @app.post("/analyze")
@@ -113,3 +144,39 @@ def analyze(request: AnalyzeRequest) -> dict:
         "llm_answer": llm_answer,
         "llm_error": llm_error,
     }
+
+
+@app.post("/chat")
+def chat(request: ChatRequest) -> dict:
+    try:
+        board = ct.build_board(request.fen, None)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    model = request.model or ct.DEFAULT_MODEL
+    engine_lines = [dict_to_line(line, "engine") for line in request.engine_lines]
+    candidate_lines = [dict_to_line(line, "candidate") for line in request.candidate_lines]
+    history = [message_to_dict(msg) for msg in request.history]
+
+    try:
+        answer = ct.llm_followup(
+            board,
+            request.prompt,
+            request.question,
+            history,
+            engine_lines,
+            candidate_lines,
+            model,
+        )
+        error = None
+    except RuntimeError as exc:
+        error = str(exc)
+        answer = ct.fallback_explain(
+            board,
+            request.question,
+            engine_lines,
+            candidate_lines,
+            error,
+        )
+
+    return {"answer": answer, "error": error}
