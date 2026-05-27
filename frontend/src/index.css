@@ -165,6 +165,14 @@ h1 {
   background: var(--board-dark);
 }
 
+.square.highlight.light,
+.square.highlight.dark {
+  background-image: linear-gradient(
+    rgba(235, 64, 52, 0.82),
+    rgba(235, 64, 52, 0.82)
+  );
+}
+
 .piece-img {
   width: 88%;
   height: 88%;

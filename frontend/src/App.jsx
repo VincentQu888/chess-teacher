@@ -114,6 +114,7 @@ export default function App() {
   const [arrows, setArrows] = useState([]);
   const [arrowStart, setArrowStart] = useState(null);
   const [arrowPreview, setArrowPreview] = useState(null);
+  const [highlights, setHighlights] = useState([]);
 
   const board = useMemo(() => parseFen(gameFen), [gameFen]);
 
@@ -210,13 +211,25 @@ export default function App() {
     setDragFrom(null);
   };
 
-  const handleArrowStart = (event, square) => {
-    if (event.button !== 2) {
+  const clearAnnotations = () => {
+    setArrows([]);
+    setHighlights([]);
+    setArrowStart(null);
+    setArrowPreview(null);
+  };
+
+  const handleSquareMouseDown = (event, square) => {
+    if (event.button === 0) {
+      // Left mousedown: chess.com-style clear of arrows + red highlights.
+      // Runs before onClick / dragstart so move logic and selection still work.
+      clearAnnotations();
       return;
     }
-    event.preventDefault();
-    setArrowStart(square);
-    setArrowPreview(null);
+    if (event.button === 2) {
+      event.preventDefault();
+      setArrowStart(square);
+      setArrowPreview(null);
+    }
   };
 
   const handleArrowEnd = (event, square) => {
@@ -224,22 +237,31 @@ export default function App() {
       return;
     }
     event.preventDefault();
-    if (!arrowStart || arrowStart === square) {
-      setArrowStart(null);
+    if (!arrowStart) {
       setArrowPreview(null);
       return;
     }
-    setArrows((prev) => {
-      const exists = prev.some(
-        (arrow) => arrow.from === arrowStart && arrow.to === square
+    if (arrowStart === square) {
+      // Right-click without drag → toggle red highlight on this square.
+      setHighlights((prev) =>
+        prev.includes(square)
+          ? prev.filter((s) => s !== square)
+          : [...prev, square]
       );
-      if (exists) {
-        return prev.filter(
-          (arrow) => !(arrow.from === arrowStart && arrow.to === square)
+    } else {
+      // Right-drag → toggle arrow from arrowStart to square.
+      setArrows((prev) => {
+        const exists = prev.some(
+          (arrow) => arrow.from === arrowStart && arrow.to === square
         );
-      }
-      return [...prev, { from: arrowStart, to: square }];
-    });
+        if (exists) {
+          return prev.filter(
+            (arrow) => !(arrow.from === arrowStart && arrow.to === square)
+          );
+        }
+        return [...prev, { from: arrowStart, to: square }];
+      });
+    }
     setArrowStart(null);
     setArrowPreview(null);
   };
@@ -255,12 +277,6 @@ export default function App() {
     setArrowPreview({ from: arrowStart, to: square });
   };
 
-  const clearArrows = () => {
-    setArrows([]);
-    setArrowStart(null);
-    setArrowPreview(null);
-  };
-
   const resetToStart = () => {
     const nextGame = new Chess();
     gameRef.current = nextGame;
@@ -271,7 +287,7 @@ export default function App() {
     setActiveSquare(null);
     setLegalTargets([]);
     setMoves("");
-    clearArrows();
+    clearAnnotations();
   };
 
   const handleRun = async () => {
@@ -460,6 +476,7 @@ export default function App() {
                   const light = (rIdx + cIdx) % 2 === 0;
                   const isActive = square === activeSquare;
                   const isTarget = legalTargets.includes(square);
+                  const isHighlighted = highlights.includes(square);
                   const pieceSrc = piece ? PIECE_IMAGES[piece] : null;
                   const pieceObj = piece ? gameRef.current.get(square) : null;
                   const isDraggable =
@@ -470,11 +487,13 @@ export default function App() {
                       key={`${rIdx}-${cIdx}`}
                       className={`square ${light ? "light" : "dark"} ${
                         isActive ? "active" : ""
-                      } ${isTarget ? "target" : ""}`}
+                      } ${isTarget ? "target" : ""} ${
+                        isHighlighted ? "highlight" : ""
+                      }`}
                       onClick={() => handleSquareClick(square)}
                       onDragOver={(event) => event.preventDefault()}
                       onDrop={(event) => handleDrop(event, square)}
-                      onMouseDown={(event) => handleArrowStart(event, square)}
+                      onMouseDown={(event) => handleSquareMouseDown(event, square)}
                       onMouseUp={(event) => handleArrowEnd(event, square)}
                       onMouseEnter={(event) => handleArrowHover(event, square)}
                     >
@@ -501,12 +520,6 @@ export default function App() {
                 })
               )}
             </div>
-          </div>
-
-          <div className="board-actions">
-            <button type="button" className="ghost" onClick={clearArrows}>
-              Clear arrows
-            </button>
           </div>
 
           <div className="form">
