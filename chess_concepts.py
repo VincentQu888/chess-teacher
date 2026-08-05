@@ -871,38 +871,61 @@ def detect_checkmate_patterns(board: chess.Board) -> List[Concept]:
 
 
 def _classify_mate(board: chess.Board, mv, piece, ksq, mover) -> str:
-    """Classify the delivered mate; board is AFTER the mating move (opponent to move)."""
-    pt = board.piece_at(mv.to_square).piece_type if board.piece_at(mv.to_square) else None
+    """Classify the delivered mate; board is AFTER the mating move (opponent to move).
+
+    Ordered most-specific-first so overlapping patterns resolve to the sharper name.
+    Every branch only *renames* a genuine mate-in-1 (never invents a tactic).
+    """
+    lp = board.piece_at(mv.to_square)
+    pt = lp.piece_type if lp else None
+    landing = mv.to_square
     kf, kr = chess.square_file(ksq), chess.square_rank(ksq)
     back = 7 if mover == WHITE else 0  # enemy back rank
+    dist = chess.square_distance(landing, ksq)
     # squares around king
     ring = [chess.square(kf + df, kr + dr)
             for df in (-1, 0, 1) for dr in (-1, 0, 1)
             if (df or dr) and 0 <= kf + df <= 7 and 0 <= kr + dr <= 7]
     own_blockers = sum(1 for s in ring
                        if board.piece_at(s) and board.piece_at(s).color == (not mover))
-    # Smothered: knight mate, king fully surrounded by own pieces
+    # piece types of the mover's units that defend the mating piece on its landing square
+    defender_types = {board.piece_at(s).piece_type
+                      for s in board.attackers(mover, landing) if board.piece_at(s)}
+    knights = pieces_of(board, mover, {chess.KNIGHT})
+    corner = ksq in (chess.A1, chess.A8, chess.H1, chess.H8)
+    on_edge = kf in (0, 7) or kr in (0, 7)
+
+    # Smothered: knight mate, king fully surrounded by its own pieces
     if pt == chess.KNIGHT and own_blockers == len(ring):
         return "Smothered mate"
-    # Back-rank: rook/queen on the enemy back rank, king boxed by own pawns
-    if pt in (chess.ROOK, chess.QUEEN) and kr == back:
+    # Arabian: knight + rook, king in a corner
+    if pt == chess.ROOK and corner and knights:
+        return "Arabian mate"
+    # Anastasia: knight + rook, king on the a/h-file (edge file, not corner)
+    if pt == chess.ROOK and kf in (0, 7) and knights:
+        return "Anastasia's mate"
+    # Hook: rook checks adjacent to the king, defended by a friendly knight (king off the
+    #       edge files -> distinguishes it from Anastasia).
+    if pt == chess.ROOK and dist == 1 and chess.KNIGHT in defender_types and kf not in (0, 7):
+        return "Hook mate"
+    # Boden: two bishops criss-crossing
+    if pt == chess.BISHOP and len(pieces_of(board, mover, {chess.BISHOP})) >= 2:
+        return "Boden's mate"
+    # Back-rank: rook/queen checks ALONG the king's back rank from a distance, king walled
+    #       in by its own pawns in front (NOT an adjacent queen mate like Qxf7#/Qh7#).
+    if pt in (chess.ROOK, chess.QUEEN) and kr == back \
+            and chess.square_rank(landing) == kr and dist >= 2:
         pawns_front = [s for s in ring if board.piece_at(s)
                        and board.piece_at(s).color == (not mover)
                        and board.piece_at(s).piece_type == chess.PAWN]
         if pawns_front:
             return "Back-rank mate"
-    # Boden: two bishops criss-crossing
-    bishops = pieces_of(board, mover, {chess.BISHOP})
-    if pt == chess.BISHOP and len(bishops) >= 2:
-        return "Boden's mate"
-    # Arabian: knight + rook, king in corner (check before Anastasia)
-    if pt == chess.ROOK and ksq in (chess.A1, chess.A8, chess.H1, chess.H8) \
-            and pieces_of(board, mover, {chess.KNIGHT}):
-        return "Arabian mate"
-    # Anastasia: knight + rook on the h-file/edge
-    if pt == chess.ROOK and kf in (0, 7) and pieces_of(board, mover, {chess.KNIGHT}):
-        return "Anastasia's mate"
-    # Epaulette: queen mate, king flanked by own rooks on the sides
+    # Ladder / staircase: two major pieces drive the king to an edge; the checker gives
+    #       check along the edge while a second friendly major cuts the next line.
+    if pt in (chess.ROOK, chess.QUEEN) and on_edge and dist >= 2 \
+            and _has_ladder_partner(board, mover, ksq, landing):
+        return "Ladder / staircase mate"
+    # Queen mates with the king boxed / pawn-supported
     if pt == chess.QUEEN:
         sides = []
         for df in (-1, 1):
@@ -912,30 +935,79 @@ def _classify_mate(board: chess.Board, mv, piece, ksq, mover) -> str:
                 sides.append(s)
         if len(sides) == 2:
             return "Epaulette mate"
-        # Swallow's tail / dovetail: king escape blocked by own pieces diagonally
-        if own_blockers >= 2:
-            return "Swallow's tail (Guéridon) mate"
+        # King boxed by its own pieces: orthogonally-adjacent queen -> Swallow's tail;
+        # diagonally-adjacent queen -> Dovetail (Cozio's).
+        if dist == 1 and own_blockers >= 2:
+            if chess.square_file(landing) == kf or chess.square_rank(landing) == kr:
+                return "Swallow's tail (Guéridon) mate"
+            return "Dovetail (Cozio's) mate"
+        # Damiano's: queen delivers mate adjacent to the king, defended by a friendly pawn.
+        if dist == 1 and chess.PAWN in defender_types:
+            return "Damiano's mate"
     return "Checkmate"
 
 
+def _has_ladder_partner(board: chess.Board, mover, ksq, checker_sq) -> bool:
+    """True if a friendly rook/queen (other than the checker) controls the rank/file one
+    step toward the centre from the king's edge — the 'cutting' line of a staircase mate."""
+    kf, kr = chess.square_file(ksq), chess.square_rank(ksq)
+    for s in pieces_of(board, mover, {chess.ROOK, chess.QUEEN}):
+        if s == checker_sq:
+            continue
+        sf, sr = chess.square_file(s), chess.square_rank(s)
+        if kr in (0, 7) and sr == (kr - 1 if kr == 7 else kr + 1):
+            return True
+        if kf in (0, 7) and sf == (kf - 1 if kf == 7 else kf + 1):
+            return True
+    return False
+
+
 def detect_named_mate_shortcuts(board: chess.Board) -> List[Concept]:
-    """Opening-specific mate names that depend on move context (Scholar's/Fool's/
-    Legal's/Damiano's/Hook/Ladder/Cozio). Detected by signature where feasible."""
+    """Opening-context mate names: Scholar's, Fool's, and Légal's. Detected by signature
+    (piece + target square + move number + material picture)."""
     out: List[Concept] = []
-    # These are recognized primarily from their setups; provide availability when a
-    # mate-in-1 matches the piece signature.
     mover = board.turn
+    piece_count = chess.popcount(board.occupied)
     for mv in _mate_in_one_moves(board):
         board.push(mv)
         ksq = board.king(not mover)
-        # Scholar's mate: queen mates on f7/f2 supported by a bishop, early game
-        if mv.to_square in (chess.F7, chess.F2) and board.piece_at(mv.to_square) \
-                and board.piece_at(mv.to_square).piece_type == chess.QUEEN \
-                and board.fullmove_number <= 6:
+        lp = board.piece_at(mv.to_square)
+        is_queen = lp is not None and lp.piece_type == chess.QUEEN
+        # Scholar's mate: queen mates on f7/f2, early game, near-full board.
+        if mv.to_square in (chess.F7, chess.F2) and is_queen and board.fullmove_number <= 6 \
+                and piece_count >= 24:
             out.append(Concept("Scholar's mate", "checkmate",
                                f"{mv.uci()} is Scholar's mate (Qxf7#)", cname(mover)))
+        # Fool's mate: the fastest possible mate — queen mates the enemy king still on its
+        # untouched home e-square in the first couple of moves. It involves no captures,
+        # so the board is still full (guards against synthetic low-piece positions).
+        home_e = chess.E1 if (not mover) == WHITE else chess.E8
+        if is_queen and ksq == home_e and board.fullmove_number <= 3 and piece_count >= 30:
+            out.append(Concept("Fool's mate", "checkmate",
+                               f"{mv.uci()} is Fool's mate (the fastest possible checkmate)",
+                               cname(mover)))
         board.pop()
+    out.extend(_detect_legals(board))
     return out
+
+
+def _detect_legals(board: chess.Board) -> List[Concept]:
+    """Légal's mate: a minor piece delivers mate in the opening after the mating side has
+    given up its queen (a queen sacrifice), while the opponent still has a queen."""
+    if board.fullmove_number > 15 or chess.popcount(board.occupied) < 24:
+        return []
+    mover = board.turn
+    if pieces_of(board, mover, {chess.QUEEN}):        # mover must have sacrificed its queen
+        return []
+    if not pieces_of(board, not mover, {chess.QUEEN}):  # a trade, not a sac
+        return []
+    for mv in _mate_in_one_moves(board):
+        p = board.piece_at(mv.from_square)
+        if p and p.piece_type in (chess.KNIGHT, chess.BISHOP):
+            return [Concept("Légal's mate", "checkmate",
+                            f"{mv.uci()} is Légal's mate (minor-piece mate after a queen "
+                            f"sacrifice)", cname(mover))]
+    return []
 
 
 # ===========================================================================
@@ -1520,8 +1592,8 @@ def detect_king_safety(board: chess.Board) -> List[Concept]:
                                    f"pawn shield missing on {', '.join(missing)}", cn))
             else:
                 out.append(Concept("Pawn shield", "king", "intact pawn shield", cn))
-        # luft
-        if kr in (0, 7):
+        # luft (only meaningful when the king is on its OWN back rank)
+        if kr == home:
             front = chess.square(kf, kr + (1 if color == WHITE else -1))
             if board.piece_at(front) and board.piece_at(front).piece_type == chess.PAWN:
                 # is there any luft (an advanced flank pawn giving an escape)?

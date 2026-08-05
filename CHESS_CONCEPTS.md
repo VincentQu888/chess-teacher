@@ -7,20 +7,34 @@ description. Goal: for every concept, design a way to **generate an explanation*
 
 ## Status: IMPLEMENTED
 Every concept below now has a **deterministic detector** in `chess_concepts.py`
-(136 concepts). `detect_all_concepts(board)` runs them all and
+(137 concepts). `detect_all_concepts(board)` runs them all and
 `format_concepts_for_prompt(board)` renders a grouped ground-truth block that the
 chess-teacher explainer folds into `build_ground_truth_block` alongside the
 existing calculation facts and the neural bot's attention-weighted saliency.
 
 Validation: `test_chess_concepts.py` has a canonical fire-position for every
-concept (120/120 strict pass) + a coverage assertion + negative controls. 16
-hard multi-move / move-context / sacrificial-line motifs (interference, clearance,
-counterattack, perpetual, zwischenzug, and the rarer named mates: Boden's,
-Légal's, Fool's, Cozio's, Hook, Ladder, Damiano's, Swallow's-tail; plus fortress,
-positional-pawn-sac, don't-move-twice) have working conservative detectors but
-are marked *lenient* (a single always-correct minimal FEN is impractical).
+concept (**129/129 strict pass**) + a coverage assertion + negative controls.
+All named mates now have geometric / move-context classifiers with genuine
+fire-positions: Back-rank, Smothered, Anastasia's, Arabian, Boden's, Epaulette,
+Scholar's, Fool's, Légal's, Hook, Ladder/staircase, Damiano's, Dovetail (Cozio's),
+Swallow's-tail. The mate classifier (`_classify_mate`) is ordered most-specific-
+first and every branch only *renames* a real mate-in-1 (it never invents a tactic).
+
+8 genuinely context/heuristic motifs remain *lenient* (a single always-correct
+minimal FEN is impractical): interference, clearance sacrifice, counterattack,
+perpetual check, zwischenzug, positional-pawn-sac, fortress, don't-move-twice.
+Their conservative detectors fire on the right real positions but are exempted
+from the strict single-FEN fire test.
+
+Deeper manual validation lives in `manual_test_concepts.py` (fuzzes every detector
+for crashes over 800 random positions, validates `static_exchange_eval` against a
+brute-force capture minimax, and cross-checks forks / pins / mates / hanging /
+passed pawns) and `manual_test_named.py` (curated recognizable positions for the
+named patterns + opening identification).
 
 Run: `./.venv/bin/python test_chess_concepts.py`
+     `./.venv/bin/python manual_test_concepts.py`   (slower; ~6 min)
+     `./.venv/bin/python manual_test_named.py`
 
 (Original legend below is historical.)
 

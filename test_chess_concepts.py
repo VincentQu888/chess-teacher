@@ -52,16 +52,16 @@ CONCEPT_TESTS = {
     "Arabian mate": ("7k/R7/5N2/8/8/8/8/6K1 w - - 0 1", None),
     "Scholar's mate": None,  # move history (filled below)
     "Epaulette mate": ("3rkr2/8/Q7/8/8/8/8/6K1 w - - 0 1", None),
-    # The remaining named mates are move-context / multi-move patterns; their detectors
-    # exist but a single minimal always-correct fire-position is impractical -> lenient.
-    "Boden's mate": None,
-    "Légal's mate": None,
-    "Fool's mate": None,
-    "Dovetail (Cozio's) mate": None,
-    "Hook mate": None,
-    "Ladder / staircase mate": None,
-    "Damiano's mate": None,
-    "Swallow's tail (Guéridon) mate": None,
+    # Named mates now have geometric/move-context classifiers with genuine fire-positions.
+    "Boden's mate": ("2kr4/3p4/8/8/2B2B2/8/8/4K3 w - - 0 1", None),
+    "Légal's mate": (None, ["e2e4", "e7e5", "g1f3", "d7d6", "f1c4", "c8g4",
+                              "b1c3", "g7g6", "f3e5", "g4d1", "c4f7", "e8e7"]),
+    "Fool's mate": (None, ["f2f3", "e7e5", "g2g4"]),
+    "Dovetail (Cozio's) mate": ("8/1K6/6pp/7k/Q7/1b5P/8/8 w - - 0 1", None),
+    "Hook mate": ("3k4/4R3/3PKN2/8/8/8/5p2/8 w - - 0 1", None),
+    "Ladder / staircase mate": ("3k4/5R2/8/8/R7/8/8/6K1 w - - 0 1", None),
+    "Damiano's mate": ("8/K1k5/2P5/3Q4/n7/8/8/8 w - - 0 1", None),
+    "Swallow's tail (Guéridon) mate": ("8/4P1Q1/8/8/8/1K6/n4n2/1kr5 w - - 0 1", None),
 
     # 3. Piece activity & coordination
     "Development": (chess.STARTING_FEN, None),
@@ -209,9 +209,6 @@ CONCEPT_TESTS.update(_MOVE_HISTORY_FILLED)
 LENIENT = {
     "Interference / Obstruction", "Clearance sacrifice", "Counterattack",
     "Perpetual check", "Zwischenzug (in-between move)",
-    "Boden's mate", "Légal's mate", "Fool's mate", "Dovetail (Cozio's) mate",
-    "Hook mate", "Ladder / staircase mate", "Damiano's mate",
-    "Swallow's tail (Guéridon) mate",
     "Positional pawn sacrifice", "Fortress",
     "Don't move the same piece twice",
 }
