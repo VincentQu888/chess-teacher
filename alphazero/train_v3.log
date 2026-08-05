@@ -1,0 +1,36 @@
+[train] device=mps
+[train] loaded 809488 positions from 166 shards
+[train] model params: 6,568,138
+[train] epoch 1/16 (1508s) train p=3.903 v=0.320 acc=0.257 | val p=3.437 v=0.117 acc=0.298 | lr=4.95e-04
+[train]   new best (val 3.554) -> best.pt
+[train] epoch 2/16 (1516s) train p=3.339 v=0.118 acc=0.302 | val p=3.226 v=0.104 acc=0.313 | lr=4.81e-04
+[train]   new best (val 3.330) -> best.pt
+[train] epoch 3/16 (1519s) train p=3.161 v=0.099 acc=0.322 | val p=3.088 v=0.080 acc=0.327 | lr=4.58e-04
+[train]   new best (val 3.168) -> best.pt
+[train] epoch 4/16 (1517s) train p=3.025 v=0.085 acc=0.338 | val p=2.958 v=0.077 acc=0.342 | lr=4.27e-04
+[train]   new best (val 3.035) -> best.pt
+[train] epoch 5/16 (1520s) train p=2.905 v=0.073 acc=0.354 | val p=2.852 v=0.072 acc=0.363 | lr=3.89e-04
+[train]   new best (val 2.924) -> best.pt
+[train] epoch 6/16 (1532s) train p=2.816 v=0.064 acc=0.365 | val p=2.790 v=0.061 acc=0.369 | lr=3.46e-04
+[train]   new best (val 2.851) -> best.pt
+[train] epoch 7/16 (1538s) train p=2.748 v=0.056 acc=0.374 | val p=2.739 v=0.057 acc=0.372 | lr=2.99e-04
+[train]   new best (val 2.797) -> best.pt
+[train] epoch 8/16 (1567s) train p=2.694 v=0.050 acc=0.380 | val p=2.703 v=0.053 acc=0.379 | lr=2.50e-04
+[train]   new best (val 2.756) -> best.pt
+[train] epoch 9/16 (1581s) train p=2.649 v=0.044 acc=0.386 | val p=2.675 v=0.051 acc=0.383 | lr=2.01e-04
+[train]   new best (val 2.726) -> best.pt
+[train] epoch 10/16 (1576s) train p=2.611 v=0.039 acc=0.389 | val p=2.651 v=0.048 acc=0.387 | lr=1.54e-04
+[train]   new best (val 2.699) -> best.pt
+[train] epoch 11/16 (1591s) train p=2.578 v=0.035 acc=0.394 | val p=2.635 v=0.047 acc=0.393 | lr=1.11e-04
+[train]   new best (val 2.681) -> best.pt
+[train] epoch 12/16 (1414s) train p=2.550 v=0.031 acc=0.397 | val p=2.625 v=0.045 acc=0.392 | lr=7.32e-05
+[train]   new best (val 2.669) -> best.pt
+[train] epoch 13/16 (1424s) train p=2.528 v=0.029 acc=0.399 | val p=2.615 v=0.044 acc=0.393 | lr=4.21e-05
+[train]   new best (val 2.659) -> best.pt
+[train] epoch 14/16 (1343s) train p=2.510 v=0.026 acc=0.401 | val p=2.611 v=0.043 acc=0.394 | lr=1.90e-05
+[train]   new best (val 2.653) -> best.pt
+[train] epoch 15/16 (1340s) train p=2.498 v=0.025 acc=0.402 | val p=2.608 v=0.043 acc=0.396 | lr=4.80e-06
+[train]   new best (val 2.651) -> best.pt
+[train] epoch 16/16 (1339s) train p=2.492 v=0.024 acc=0.402 | val p=2.607 v=0.043 acc=0.394 | lr=0.00e+00
+[train]   new best (val 2.649) -> best.pt
+[train] DONE

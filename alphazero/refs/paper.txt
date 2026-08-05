@@ -1,0 +1,860 @@
+Inherently Explainable Reinforcement Learning
+in Natural Language
+
+Xiangyu Peng†
+Mark O. Riedl†
+†
+Georgia Institute of Technology
+
+Prithviraj Ammanabrolu‡
+‡
+Allen Institute for AI
+
+arXiv:2112.08907v3 [cs.HC] 6 Oct 2022
+
+{xpeng62,riedl}@gatech.edu, raja@allenai.org
+
+Abstract
+We focus on the task of creating a reinforcement learning agent that is inherently
+explainable—with the ability to produce immediate local explanations by thinking out loud while performing a task and analyzing entire trajectories post-hoc
+to produce temporally extended explanations. This Hierarchically Explainable
+Reinforcement Learning agent (HEX-RL), operates in Interactive Fictions, textbased game environments in which an agent perceives and acts upon the world
+using textual natural language. These games are usually structured as puzzles
+or quests with long-term dependencies in which an agent must complete a sequence of actions to succeed—providing ideal environments in which to test an
+agent’s ability to explain its actions. Our agent is designed to treat explainability
+as a first-class citizen, using an extracted symbolic knowledge graph-based (KG)
+state representation coupled with a Hierarchical Graph Attention mechanism
+that points to the facts in the internal graph representation that most influenced
+the choice of actions. Experiments show that this agent provides significantly
+improved explanations over strong baselines, as rated by human participants
+generally unfamiliar with the environment, while also matching state-of-the-art
+task performance.
+
+1 Introduction
+Explainable AI refers to artificial intelligence
+methods and techniques that provide humanunderstandable insights into how and why an
+AI system chooses actions or makes predictions.
+Such explanations are critical for ensuring reliability and improving trustworthiness by increasing
+user understanding of the underlying model. In
+this work we specifically focus on creating deep reinforcement learning (RL) agents that can explain
+their actions in sequential decision making environments through natural language.
+In contrast to the majority of contemporary work
+in the area which focuses on supervised machine
+learning problems which require singular instance
+level local explanations (You et al., 2016; Xu et al.,
+2015; Wang et al., 2017; Wiegreffe and Marasovic,
+2021), such environments—in which agents need
+to reason causally about actions over a long series
+
+Observation: Forest Path
+The path heads northsouth here.
+One particularly large tree with some low
+branches stands at the edge of the path...
+Action: go up
+Game Score: 0
+✵ Explanation:
+I am in the Forest Path now.
+trees are intereactable
+✪ Agent needs this action to:
+take egg at Up a tree
+Observation: ​Up a tree ​
+Beside you on the branch is a small birds nest
+In the birds nest is a large egg encrusted with
+precious jewels, scavenged by a childless songbird...
+Action: take egg
+Game Score: 5
+✵ Explanation:
+egg is interactable
+Observation: Up a tree
+Taken.
+
+Figure 1: Excerpt from zork1 with immediate
+step-by-step explanations constructed from
+the KG represented by and temporally extended explanations by . Colors represent
+different categories of KG facts seen in Fig. 2.
+
+36th Conference on Neural Information Processing Systems (NeurIPS 2022).
+
+of steps—require an agent to take into account both environmentally grounded context as well
+as goals when producing explanations. Agents implicitly contain beliefs regarding the downstream effects—the changes to the world—that actions taken at the current timestep will have.
+This requires explanations in these environments to contain an additional temporally extended
+component taking the full trajectory’s context into account—complementary to the immediate
+step-by-step explanations.
+Interactive Fiction (IF) games (Fig. 1) are partially observable environments where an agent
+perceives and acts upon a world using potentially incomplete textual natural language descriptions.
+They are structured as long puzzles and quests that require agents to reason about thousands of
+locations, characters, and objects over hundreds of steps, creating chains of dependencies that
+an agent must fulfill to complete the overall task. They provide ideal experimental test-beds for
+creating agents that can both reason in text and explain it.
+We introduce an approach to game playing agents—Hierarchically Explainable Reinforcement
+Learning (HEX-RL)—that is designed to be inherently explainable, in the sense that its internal
+state representation—i.e. belief state about the world—takes the form of a symbolic, humaninterpretable knowledge graph (KG) that is built as the agent explores the world. The graph
+is encoded by a Graph Attention network (GAT) (Veličković et al., 2017) extended to contain a
+hierarchical graph attention mechanism that focuses on different sub-graphs in the overall KG
+representation. Each of these sub-graphs contains different information such as attributes of
+objects, objects the player has, objects in the room, current location, etc. Using these encoding
+networks in conjunction with the underlying world KG, the agent is able to create immediate
+explanations akin to a running commentary that points to the facts within this knowledge graph
+that most influence its current choice of actions when attempting to achieve the tasks in the game
+on a step-by-step basis.
+While graph attention can tell us which elements in the KG are attended to when maximizing
+expected reward from the current state, it cannot explain the intermediate, unrewarded dependencies that need to be satisfied to meet the long term task goals. For example, in the game
+zork1, the agent needs to pick up a lamp early on in the game—an unrewarded action—but the
+lamp is only used much later on to progress through a location without light. Thus, our agent
+additionally analyzes an overall episode trajectory—a sequence of knowledge graph states and
+actions from when the agent first starts in a world to either task completion or agent death—to
+find the intermediate set of states that are most important for completing the overall task. This
+information is used to generate a temporally extended explanation that condenses the immediate
+step-by-step explanations to only the most important steps required to fulfill dependencies for the
+task.
+Our contributions are as twofold: (1) we create an inherently explainable agent that uses an
+ever-updating knowledge-graph based state representation to generate step-by-step immediate
+explanations for executed actions as well as performing a post-hoc analysis to create temporal
+explanations; and (2) a thorough experimental study against strong baselines that shows that
+our agent generates significantly improved explanations for its actions when rated by human
+participants unfamiliar with the domain while not losing any task performance compared to the
+current state-of-the-art knowledge graph-based agents.
+
+2 Background and Related Work
+Interactive Fiction (IF) games are simulations featuring language-based state and action spaces. It
+provides a platform for exploring lifelong open-domain dialogue learning (Shuster et al., 2020) and
+action elimination with deep reinforcement learning (Zahavy et al., 2018). In this paper, we use IF
+games as our test-bed because they provide an ideal platform for collecting data, linking game
+states and actions to the corresponding natural language explanations. We use the definition of
+text-adventure games as seen in Côté et al. (2018) and Hausknecht et al. (2020). We take Jericho
+(Hausknecht et al., 2020), a framework for interacting with text games, as the interface connecting
+learning agents with interactive fiction games. A text game can be defined as a partially-observable
+Markov Decision Process: G = 〈S, P, A,O, Ω, R, γ〉, representing the set of environment states,
+conditional transition probabilities between states, the vocabulary or words used to compose text
+2
+
+Action
+
+south
+
+path
+
+ha
+s
+
+is
+open-
+
+South of
+
+able
+
+House
+
+You
+
+Hierarchical
+Attention
+
+have
+
+Key:
+Locations
+Surr. Obj.s
+Inv. Obj.s
+Attributes
+
+LSTM
+Attention
+
+GAT
+
+GAT
+
+Hierarchical
+Graph Attention
+
+window
+
+Behind
+House
+
+Update
+
+Update
+Recurrent
+Text Encoder
+
+Questions:
+Where am I located?
+What is here?
+What do I have? ...
+
+Knowledge
+Graph
+State
+Representation
+
+ALBERT-QA
+
+Observation
+
+house
+
+path
+
+in
+You
+
+Objects
+in the
+room
+
+North
+of
+House
+
+Behind east
+House
+south
+
+Behind House
+You are behind the white house. A path leads into
+the forest to the east. In one corner of the house
+there is a small window which is slightly ajar.
+You are carrying: A jewel-encrusted egg
+Attributes: talkable, openable, animate, treasure ...
+
+Player's
+Objects
+
+egg
+
+Forest
+
+.
+
+openable Attribute
+
+s
+ha
+
+is
+
+s
+
+house
+
+egg
+
+treasure
+
+House
+
+east
+
+ha
+
+have
+
+Behind
+
+window
+is
+
+South
+of
+House
+
+Sub Knowledge graph
+
+You
+
+LSTM Attention
+
+is
+openable
+
+egg
+is
+treasure
+
+s
+
+in
+
+ha
+
+s
+
+window
+
+Value
+Predictor
+
+ha
+
+is
+
+able
+
+.
+.
+.
+
+graph mask
+
+north
+
+open-
+
+Value
+Critic
+
+Sequential
+Action
+Actor Decoder
+
+s
+
+. . .
+
+House
+
+ha
+
+North of
+
+north
+
+. . .
+
+Forest
+
+Locations
+
+Figure 2: Knowledge graph extraction and the (HEX-RL) agent’s architecture at step t .
+
+commands, observations, observation conditional probabilities, reward function, and discount
+factor, respectively. The reinforcement learning agent is trained to learned a policy πG (o) → a.
+Knowledge Graphs for Text Games. Ammanabrolu et al. (2020) proposed Q*BERT, a reinforcement learning agent that learns a KG of the world by answering questions. Xu et al. (2020) introduce
+the SHA-KG, a stacked Hierarchical Graph Attention mechanism to construct an explicit representation of the reasoning process by exploiting the structure of the KG. Adhikari et al. (2020) present
+the Graph-Aided Transformer Agent (GATA) which learns to construct a KG during game play and
+improves zero-shot generalization on procedurally generated TextWorld games. Other works such
+as Murugesan et al. (2020) explore how to use KGs to endow agents with commonsense. While
+these works showcase the effectiveness of KGs on task performance and do not focus on how
+explainable their architectures are. We further note that these architectures do now allow for as
+fine-grained attention-based attribution as HEX-RL’s architecture does—e.g. Q*BERT does not
+use relationship information in their policy and SHA-KG averages attention across large portions
+of the graph and is unable to point to specific triples in its KG representation to explain an action.
+Explainable Deep RL. Contemporary work on explaining deep reinforcement learning policies
+can be broadly categorized based on: (1) how the information is extracted, either via intrinsic
+motivation during training (Shu et al., 2017; Hein et al., 2017; Verma et al., 2018) or through
+post-hoc analysis (Rusu et al., 2015; Hayes and Shah, 2017; Juozapaitis et al., 2019; Madumal
+et al., 2020); and (2) the scope—either global (Zahavy et al., 2016; Hein et al., 2017; Verma et al.,
+2018; Liu et al., 2018) or local (Shu et al., 2017; Liu et al., 2018; Madumal et al., 2020; Guo et al.,
+2021). In our work, we create an agent that spans more than one of these categories providing
+immediately local explanations through extracted knowledge graph representations and post-hoc
+temporal explanations. Inspired by Madumal et al. (2020), we learn a graphical causal model
+which focuses on using relations between steps in a puzzle to generate temporal explanations
+instead of generating counterfactuals.
+
+3 Hierarchically Explainable RL
+Our work aims to generate (1) immediate step-by-step explanations of an agent’s policy by capturing the importance of the current game state observation and (2) temporally extended explanations
+that take into context an entire trajectory via a post-hoc analysis. Formally, let X = {st , at }t =1:T be
+the set of game steps that compose a trajectory. Each game state s t consists of a knowledge graph
+G t representing all the information learned since the start of the game. This graph is further split
+into four sub-knowledge graphs each containing different, semantically related relationship types.
+This section first describes a graph attention based architecture that uses these sub-graphs to produce immediate explanations. We then describe how to filter the game states in a trajectory into a
+condensed set of the most important ones X0 ⊂ X that best capture the underlying dependencies
+that need to be fulfilled to complete the task—enabling us to produce temporal explanations.
+3
+
+Knowledge Graph State Representation. Building on Ammanabrolu et al. (2020), constructing
+the knowledge graph is treated as a question-answering task. KGs in these games take the form of
+RDF triples (Klyne, 2004) of 〈sub j ec t , r el at i on, ob j ec t 〉—extracted from text observations and
+update as the agent explores the world. The agent answers questions about the environment such
+as, “What am I carrying?” or “What objects are around me?”. A specially constructed dataset for
+question answering in text games—JerichoQA—is used to fine-tune ALBERT (Lan et al., 2019) to
+answer these questions (See Appendix A.3). The answers form a set of candidate graph vertices Vt
+for the current step and questions form the set of relations R t . Both Vt and R t are then combined
+with the graph at the previous step G t −1 to update the agent’s belief about the world state into G t .
+The left side of Figure 2 showcases this.
+In an attempt to enable more fine grained explanation generation and inspired by Xu et al. (2020),
+we divide the knowledge graph G into multiple sub-graphs G at r ,G i nv ,G ob j ,G l oc , each representing (1) attributes of objects, (2) objects the player has, (3) objects in the room, and (4) other
+information such as location (right side of Fig. 2) based on the corresponding relationship types
+extracted by the ALBERT-QA module. The union of all sub-graphs is equivalent of Vt and R t
+extracted from the current game state. The full knowledge graph G t captures the overall game
+state since the start of the game. The sub-graphs easily reflect different relationships of the current
+game state.
+Template Action Space. Agents output a language string into the game to describe the actions that they want to perform. To ensure tractability, this action space can be simplified
+down into templates. Templates consist of interchangeable verbs phrases (V P ), optionally followed by prepositional phrases (V P P P ), e.g. ([c ar r y/t ake] ) and ([t hr ow/d i sc ar d /put ]
+[ag ai nst /on/d own] ), where the verbs and prepositions within [.] are aliases. Actions are constructed from templates by filling in the template’s blanks using words in the game’s vocabulary.
+Size of action space is shown in Appendix A.1.
+
+3.1 Immediate Explanations
+Our immediate explanations consist of finding the subset of triplets in sub-graphs
+G at r ,G i nv ,G ob j ,G l oc c the action decision made at the current step—is capable of explaining the
+action. We introduce a deep RL architecture capable of this.
+Hierarchical Knowledge Graph Attention³ Architecture. At each
+´ step, a total score R t and an
+
+observation o t is received—consisting of o tdesc , o tgame , o tinv , a t −1 corresponding to the room description, game feedback, inventory, and previous action and are processed using a GRU based
+encoder using the hidden state from the previous step, combining them into a single observation
+embedding ot ∈ Rd t ext ×c (bottom of Fig. 2).
+The full knowledge graph G t is processed via Graph Attention Networks (GATs) (Veličković et al.,
+2017) followed by a linear layer to get the graph representation gt ∈ Rd t ext (middle of Fig. 2). We
+compute LSTM attention between ot and gt as:
+αLSTM = softmax (W l h LSTM + b l )
+¡
+¡
+¢¢
+h LSTM = tanh W o o t ⊕ W g gt + b g
+
+(1)
+(2)
+
+where ⊕ denotes the addition of a matrix and a vector. W l ∈ Rd t ext ×d t ext , W g ∈ Rd t ext ×d t ext , W o ∈
+Rd t ext ×d t ext are weights and b l ∈ Rd t ext , b o ∈ Rd t ext are biases. The overall representation vector is
+updated as:
+qt = gt +
+
+c
+X
+
+αLSTM,i ¯ o t,i
+
+i
+
+where ¯ denotes dot-product and c is the number of o t ’s components.
+4
+
+(3)
+
+Sub-graphs are also encoded by GATs to get the graph representation g0t ∈ RdG t ,sub ×m (no. of
+subgraphs). The Hierarchical Graph Attention between qt ∈ RdG t ,sub 1 and g0t is calculated by:
+αHierarchical = softmax (W H h H + b H )
+¡
+¡
+¢¢
+h H = tanh W g0 g 0t ⊕ W q q t + b q
+
+(4)
+(5)
+
+where W H ∈ RdG t ,sub ×dG t ,sub , W g0 ∈ RdG t ,sub ×dG t ,sub , W q ∈ RdG t ,sub ×dG t ,sub are weights and b H ∈
+RdG t ,sub , b q ∈ RdG t ,sub are biases. Then we get state representation, consisting of the textual observations full knowledge graph and sub-knowledge graph.
+vt = qt +
+
+s
+X
+i
+
+αHierarchical,i ¯ g 0t,i
+
+(6)
+
+where s is the number of sub-graphs (4 in our paper). The full architecture can be found in
+Figure 2.
+The agent is trained via the Advantage Actor Critic (A2C) (Mnih et al., 2016) method to maximize
+long term expected reward in the game in a manner otherwise unchanged from Ammanabrolu
+et al. (2020) (See Appendix A.2). These attention values thus reflect the portions of the knowledge
+graphs that the agent must focus on to best achieve this goal of maximizing reward.
+Hierarchical Graph Attention Explanation. The graph attention αHierarchical is used to capture
+the relative importance of game state observations and KG entities in influencing action choice.
+For each sub-graph, the graph attention, αHierarchical,i ∈ Rnnodes ×m is summed over all the channels
+m to obtain α0Hierarchical,i ∈ Rnnodes ×1 , showing the importance of the KG nodes in the i th sub-graph.
+The top-k valid entities (and corresponding edges) with highest absolute value of its attention
+form the set of knowledge graph triplets that best locally explain the action a t .
+In order to make the explanation more readable for a human reader, we further transform knowledge graph triplets to natural language by template filling.
+We create templates for each type of sub-graphs G at r ,G i nv ,G ob j ,G l oc .
+• 〈ob j ec t , i s, at t r i but e〉→“Object is attribute”
+• 〈pl a yer, has, ob j ec t 〉→“I have object”
+• 〈ob j ec t , i n, l oc at i on〉→“Object is in location”
+• 〈l oc at i on1, d i r ec t i on, l oc at i on2〉→“location 1 is in the direction of location 2”, e.g.
+〈 f or est , nor t h, house〉 is converted to “Forest is in the north of house”
+More examples can be found in Appendix A.4.
+3.2 Temporally Extended Explanations
+Graph attention tells us which entities in the KG are attended to when making a decision, but
+is not enough alone for explaining “why” actions are the right ones in the context of fulfilling
+dependencies that may potentially be unrewarded by the game—especially given the fact that
+there are potentially multiple ways of achieving the overall task. HEX-RL thus saves trajectories for
+hundreds of test time rollouts of the games, performed once a policy has been trained (Table 1 and
+Appendix A.5). The game trajectories consist of all the game states, actions taken, predicted critic
+values, game scores, the knowledge graphs, and the immediate step level explanations generated
+as previously described. HEX-RL produces a temporal explanation by performing a post-hoc
+analysis on these game trajectories. The agent then analyzes and filters these trajectories in an
+attempt to find the subset of states that are most crucial to achieving the task as summarized in
+Figure 3—then using that subset of states to generate temporal trajectory level explanations.
+Bayesian State Filter. We first train a Bayesian model to predict the conditional probability
+P(A | B i ) of a game step (A) given any other possible game step (B i ) in the game trajectories. More
+specifically, each game step is composed of 3 elements, game state o t , action a t and the current
+knowledge graph G t . The key intuition here being that state, action pairs that appear in a certain
+ordering in multiple trajectories are more likely to dependant on each other.
+1 A linear transformation ensures that q ∈ RdG t ,sub .
+t
+
+5
+
+The set of game steps with the highest P(A | B i ) is used to explain taking the action associated
+with game state A. For example, “take egg” (A) is required to “open egg” (B ), and P(A | B ) = 1,
+hence “open egg” is used as a reason why action “take egg” must be taken first. The initial set of
+game states X is filtered into X1 by working backwards from the final goal state by finding the set of
+states that form the most likely chain of causal dependencies that lead to it. Details can be found
+in Appendix A.5 and A.6.
+
+Language Model Action Filter. Following
+this, we apply a GPT-2 (Radford et al., 2019)
+Behind House
+language model trained to generate actions
+Game Trajectories
+gamestates
+states
+Go north
+AllAllgame
+Forest Path
+(Table 1)
+based on transcripts of text games from huNorth of House
+B
+i
+A
+man play-throughs to further filter out imporBAYES
+tant states—known as the Contextual Action
+P(A|Bi) > p
+Language Model (CALM) (Yao et al., 2020). As
+Forest Path
+this language model is trained on human tranGo up
+Up a tree
+scripts, we hypothesize that it is able to further
+filter down the set of important states by findCALM
+ing the states that have corresponding actions
+Key
+Up a Tree
+that a human player would be more likely to
+Input
+Take egg
+5
+perform—thus potentially leading to more natUsed for Training
+Up a Tree
+Location before Action
+ural explanations. CALM takes into observaSemantic Filter
+Action
+tion o t , action a t and the following observaLocation after Action
+Game score
+tion o t +1 , and predicts next valid actions a t +1 .
+Behind House
+Go west
+10
+In our work, we use CALM as a filter to look
+Kitchen
+for the relations between a game step A and
+the explanation candidates B i ∈ X1 . We feed
+Figure 3: Temporal explanation pipeline for why
+CALM with the prompt o A , a A , o B i to get an acthe agent chose the action—"go north" at "Betion candidate set. When the two game steps
+hind House".
+A and B i are highly correlated, given o A , a A
+and o B i , CALM should successfully predict a B i
+with high probability. The game steps B i , whose associated action a B i is in this generated action
+candidates set, are saved as the next set of filtered important candidate game states (X2 ).
+
+Semantic State-Action Filter. To better ac- Table 1: Example state saved during game play.
+count for the irregularities of the puzzle like
+environment, we adopt a semantic filter to STEP: 16
+obtain the final important state set X3 . Here,
+Text Observation:
+given A, B i ∈ X2 , states are further filtered on
+Up a Tree
+the basis of whether one of these scenarios oc- Beside you on the branch is a small birds nest.
+curs: (1) a A and a B i contain the same entities, In the birds nest is a large egg encrusted with jewels...
+e.g. “take egg” and “open egg”. (2) G A and G B i Knowledge graph:
+share the same entities, e.g. “lamp” occurs 〈t r ee, i n, f or est 〉, 〈eg g , i s, i nt er act abl e〉...
+in both observations. (3) A and B i occur in
+Action: take egg
+the same location, e.g. after taking action a A , Immediate explanation: egg is interactable
+the player enters “kitchen” and B occurs in
+“kitchen”. (4) The state has a non-zero reward Game Score:5
+or a high absolute critic value, indicating that Critic Value: 5.7457
+it is either a state important for achieving the goals of the game or it is a state to be avoided. The
+final set of important game states X3 is used to synthesize post-hoc temporal explanations for why
+an action was performed in a particular state—as seen in Figure 1—taking into account the overall
+context of the dependencies required to be satisfied and building on the immediate step level
+explanations for each given state in X3 . Ablation studies pin-pointing the relative contributions
+of the different filters are found in Section 4.4. We concluded that all three steps of the filtering
+process to identify important states are necessary for creating coherent temporal explanations
+that effectively take into account the context of the agent’s goals.
+6
+
+Table 2: Asymptotic scores on games by different methods across 5 independent runs. Eps.
+indicates normalized scores averaged across 100 episodes of testing which occurs at the end of the
+training period and Max indicates the maximum score seen by the agent over the same period.
+We present results on two training rewards for HEX-RL, game only and game and IM.
+Experiment
+
+LSTM-A2C
+
+Metric
+zork1
+library
+detective
+balances
+pentari
+ztuu
+ludicorp
+deephome
+temple
+% compl.
+std dev
+
+Eps.
+27
+8.2
+141
+10
+50.4
+5
+14.4
+1
+8
+22.6
+0.02
+
+Max
+31.2
+10
+188
+10
+55
+5
+18
+1
+8
+25.9
+0.01
+
+KG-A2C
+Eps.
+34
+14.3
+207.9
+10
+50.7
+5
+17.8
+1
+7.6
+27.3
+0.06
+
+Max
+35
+19
+214
+10
+56
+5
+19
+1
+8
+30.8
+0.01
+
+SHA-KG
+Eps.
+33.6
+10.0
+246.1
+9.8
+48.2
+5
+17.6
+1
+7.9
+27.2
+-
+
+Max
+34.5
+15.8
+308
+10
+51.3
+25
+17.8
+1
+6.9
+33.1
+-
+
+Q*BERT
+Eps.
+35
+18
+274
+10
+50
+5
+18
+1
+8
+30.8
+0.03
+
+Max
+35
+18
+310
+10
+56
+5
+19
+1
+8
+34.9
+0.00
+
+HEX-RL
+Game Only
+Eps. Max
+29.8
+40
+16.0
+19
+276.7 330
+10.0
+10
+34.6
+55
+5.0
+5
+14.0
+18
+1.0
+1
+8.0
+8
+27.2
+33.9
+0.03
+0.01
+
+HEX-RL
+Game and IM
+Eps.
+Max
+30.2
+40
+13.8
+21
+276.9 330
+10.0
+10
+44.7
+60
+5.1
+9
+17.6
+18
+1.0
+1
+7.6
+8
+28.2
+35.8
+0.03
+0.02
+
+Max
+350
+30
+360
+51
+70
+100
+150
+300
+35
+100
+-
+
+4 Evaluation
+Our evaluation consists of three phases: (1) We show that HEX-RL has the comparable performance to state-of-art reinforcement learning agents on text games in Section 4.1. (2) Then in
+Section 4.2, we evaluate our immediate attention explanation model by comparing the explanations generated by HEX-RL and agents that do not use knowledge graphs (See Fig. 2 and
+Section 3.1). (3) In Section 4.3 we compare immediate to temporal explanations, focusing on the
+effects that including trajectory level context when evaluating explanations in the context of agent
+goals. (4) In Section 4.4 we conduct human participant ablation study evaluating the individual
+contributions of the filtration pipeline for generating temporal explanations seen in Figure 3.
+4.1 Task Performance Evaluation
+We compare HEX-RL with four strong state-of-art reinforcement learning agents—focusing on
+contemporary agents that use knowledge graphs—on an established test set of 9 games from the
+Jericho benchmark (Hausknecht et al., 2020).
+• LSTM-A2C is a baseline that only uses natural language observations as state representation that is encoded with an LSTM-based policy network.
+• KG-A2C. Instead of training a question-answering system like Q*BERT to build knowledge
+graph state representation, KG-A2C (Ammanabrolu and Hausknecht, 2020) extracts
+knowledge graph triplets from the text observations using a rules based approach built
+on OpenIE (Angeli et al., 2015).
+• SHA-KG is adapted from Xu et al. (2020) and uses a rules-based approach to construct
+a knowledge graph for the agent which is then fed into a Hierarchical Graph Attention
+network as in HEX-RL. This agent separates the sub-graphs out using a rules-based
+approach and makes no use of any graph edge relationship information.
+• Q*BERT. Ammanabrolu et al. (2020) uses a similar method of creating the knowledge
+graph through question answering but does not use the hierarchical graph attention
+architecture combined with the sub-graphs.
+These baselines are all trained via the Advantage Actor Critic (A2C) (Mnih et al., 2016) method—
+further comparisons to other contemporary agents can be found in Appendix A.7. It is also worth
+noting that most contemporary state of the art deep RL agents for text games use recurrent neural
+policy networks as opposed to transformer networks due to their improved performance in this
+domain.
+HEX-RL Training. We trained HEX-RL on two reward types: (a) game only, which indicates that
+we only use score obtained from the game as reward. (2) game with intrinsic motivation (game
+7
+
+and IM), which contains an additional intrinsic motivation reward based on knowledge graph
+expansion as seen in Ammanabrolu et al. (2020)—where the agent is additionally rewarded for
+learning more about the world by finding new facts for knowledge graph (see Appendix A.8, A.9
+and A.10).
+Table 2 shows the performance of HEX-RL and the other four baselines. We can see that designing
+the HEX-RL agent to be inherently explainable through the use of Hierarchical Graph Attention
+and the sub-graphs improves the overall maximum score seen during training when compared to
+any of the other agents. In terms of the average score seen during the final 100 episodes, HEX-RL
+wth intrinsic motivation outperforms all baselines with the exception of Q*BERT—there HEX-RL
+significantly outperforms Q*BERT on one game, is outperformed on two games, and comparable
+on the remaining six games. HEX-RL thus performs comparably to other state-of-the-art baselines
+in terms of overall task performance while also boasting the additional ability to explain its actions.
+4.2 Immediate Explanation Evaluation
+Having established that HEX-RL’s performance while playing text games is comparable to other
+state-of-the-art agents, we attempt to answer the question of exactly how useful the knowledge
+graph based architecture is when generating immediate step-by-step explanations by comparing
+HEX-RL to a baseline that doesn’t use knowledge graphs in a human participant study. Two models
+for step-by-step explanations are compared:
+• LSTM Attention explanations. Extracts the most important substring in the observations
+through LSTM attention αLST M and then uses those words to create an explanation.
+• Hierarchical Graph Attention explanations. Extracts KG triplets most influenced the
+choice of actions by Hierarchical Attention αHierarchical and then transforming them into
+readable language explanations through templates.
+We recruited 40 participants—generally unfamiliar with the environment at hand—on a crowd
+sourcing platform. Each participant reads a randomly selected subset of 10 explanation pairs
+(drawn randomly from a pool totaling 60 explanation pairs), generated by Hierarchical Graph
+Attention and LSTM attention explanation on three games in the Jericho benchmark: zork1,
+library, and balances. We choose three games with very different structures and genres as defined
+in Hausknecht et al. (2020). They each require a diverse set of action types and solutions to
+complete and thus provide a wide area of coverage when used as test beds for human evaluation
+of explanations. Then they are given the following metrics and asked to choose which explanation
+they prefer for that metric:
+• Confidence: This explanation makes you more confident that the agent made the right
+choice.
+• Human-likeness: This explanation expresses more human-like thinking on the action
+choice.
+• Understandability: This explanation makes you understand why the agent made the
+choice.
+Variations of these questions have been used to evaluate other explainable AI systems (eg. Ehsan
+et al. (2019)). At least 5 participants give their preference for each explanation pair. We take the majority preference from humans participants as the result. More details are shown in Appendix B.1.
+Figure 4 shows the result of the human evaluation of attention explanations. Hierarchical graph
+attention explanation is preferred over LSTM attention explanation in all three dimensions. These
+results are statistically significant (p < 0.05) with fair inter-rater reliabilities. We also observe that
+these three dimensions are highly, positively correlated using Spearman’s Rank Order Correlation.2
+A slightly higher proportion of participants preferred the LSTM Attention explanations in the
+human-likeness dimension compared to the other two. The participants preferring LSTM Attention explanation stated that they found it intuitive but often incoherent and found the Hierarchical
+Graph Attention explanations to be more robotic. LSTM attention explanations are substrings of
+the human-written observation and thus have the potential to be more natural sounding than
+2 r = 0.70, p < 0.01, between “confidence” and “understandability”; r = 0.67, p < 0.01, between “confis
+s
+dence” and “human-likeness”; r s = 0.89, p < 0.01, between “human-likeness” and “understandability”
+
+8
+
+

@@ -1,0 +1,11 @@
+[gen] 4000 games across 9 workers, depth=10, multipv=5, shard-size=5000
+[gen] worker done (1/9), +37832 positions, total=37832, 15 pos/s
+[gen] worker done (2/9), +38604 positions, total=76436, 29 pos/s
+[gen] worker done (3/9), +39638 positions, total=116074, 44 pos/s
+[gen] worker done (4/9), +39056 positions, total=155130, 59 pos/s
+[gen] worker done (5/9), +39124 positions, total=194254, 73 pos/s
+[gen] worker done (6/9), +38317 positions, total=232571, 88 pos/s
+[gen] worker done (7/9), +39994 positions, total=272565, 102 pos/s
+[gen] worker done (8/9), +38442 positions, total=311007, 116 pos/s
+[gen] worker done (9/9), +38729 positions, total=349736, 130 pos/s
+[gen] DONE 349736 positions in 2686.2s

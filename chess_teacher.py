@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -1459,6 +1460,44 @@ def format_history_for_prompt(history: List[Dict[str, str]], max_items: int = 6)
     return "\n".join(lines) if lines else "(none)"
 
 
+# --- Attention-model (AlphaZero-style bot) integration -----------------------
+# The bot lives in ./alphazero with its own (torch) venv. We shell out to its
+# explain_position.py to get the attention-weighted board state: the model's
+# value, its top moves, and the squares its attention says most influenced the
+# evaluation / the chosen move. This is model-grounded saliency that complements
+# the deterministic facts below (idea from HEX-RL, arXiv:2112.08907).
+_AZ_DIR = Path(__file__).resolve().parent / "alphazero"
+_AZ_PYTHON = _AZ_DIR / ".venv" / "bin" / "python"
+_AZ_SCRIPT = _AZ_DIR / "explain_position.py"
+_AZ_ENABLED = os.getenv("CHESS_TEACHER_ATTENTION", "1") != "0"
+
+
+def attention_model_block(board: chess.Board, timeout: float = 30.0) -> Optional[str]:
+    """Return the attention model's ground-truth block for ``board``, or None if
+    the bot/checkpoint is unavailable or the call fails (graceful degradation)."""
+    if not _AZ_ENABLED or not _AZ_PYTHON.exists() or not _AZ_SCRIPT.exists():
+        return None
+    try:
+        proc = subprocess.run(
+            [str(_AZ_PYTHON), str(_AZ_SCRIPT), "--fen", board.fen(), "--device", "cpu"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(_AZ_DIR),
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    try:
+        data = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        return None
+    if "error" in data or "prompt_block" not in data:
+        return None
+    return data["prompt_block"]
+
+
 def build_ground_truth_block(board: chess.Board) -> str:
     """Assemble every deterministic board-state section into one block. Order is
     chosen to put the most concrete (placement, attacks, defenses) before the more
@@ -1489,6 +1528,18 @@ def build_ground_truth_block(board: chess.Board) -> str:
         f"King-zone threats:\n{king_zone_text}\n\n"
         f"Position facts (tactical: hanging vs defended):\n{position_facts_text}\n\n"
         f"Strategic facts (positional structure):\n{strategic_text}"
+        + _attention_section(board)
+    )
+
+
+def _attention_section(board: chess.Board) -> str:
+    """Optional trailing section with the attention model's read of the position."""
+    block = attention_model_block(board)
+    if not block:
+        return ""
+    return (
+        "\n\nAttention model (neural bot) read — model-grounded, use to support the "
+        "explanation but defer to the engine lines for best play:\n" + block
     )
 
 

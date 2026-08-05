@@ -312,7 +312,7 @@ export default function App() {
       .filter(Boolean);
 
     try {
-      const response = await fetch("http://localhost:8000/analyze", {
+      const response = await fetch("http://localhost:8001/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -358,7 +358,7 @@ export default function App() {
     setChatError("");
 
     try {
-      const response = await fetch("http://localhost:8000/chat", {
+      const response = await fetch("http://localhost:8001/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
