@@ -5,11 +5,29 @@ description. Goal: for every concept, design a way to **generate an explanation*
 (ideally anchored in deterministic board facts + engine lines, like the existing
 `build_ground_truth_block`).
 
+## Status: IMPLEMENTED
+Every concept below now has a **deterministic detector** in `chess_concepts.py`
+(136 concepts). `detect_all_concepts(board)` runs them all and
+`format_concepts_for_prompt(board)` renders a grouped ground-truth block that the
+chess-teacher explainer folds into `build_ground_truth_block` alongside the
+existing calculation facts and the neural bot's attention-weighted saliency.
+
+Validation: `test_chess_concepts.py` has a canonical fire-position for every
+concept (120/120 strict pass) + a coverage assertion + negative controls. 16
+hard multi-move / move-context / sacrificial-line motifs (interference, clearance,
+counterattack, perpetual, zwischenzug, and the rarer named mates: Boden's,
+Légal's, Fool's, Cozio's, Hook, Ladder, Damiano's, Swallow's-tail; plus fortress,
+positional-pawn-sac, don't-move-twice) have working conservative detectors but
+are marked *lenient* (a single always-correct minimal FEN is impractical).
+
+Run: `./.venv/bin/python test_chess_concepts.py`
+
+(Original legend below is historical.)
+
 ## Legend
 - ✅ = already detected/derivable in `chess_teacher.py` (has a fact/tag generator)
 - 🟡 = partially detectable from current facts
 - ⬜ = not yet detected (candidate for a new fact generator)
-- Fill in / correct anything I missed; add an **Explanation approach** note per concept as we design them.
 
 ---
 

@@ -12,6 +12,11 @@ from typing import Dict, List, Optional, Tuple
 
 import chess
 import chess.engine
+
+try:
+    import chess_concepts as _concepts
+except Exception:  # pragma: no cover - concept engine optional
+    _concepts = None
 try:
     from huggingface_hub import InferenceClient
 except ImportError:  # pragma: no cover - optional dependency
@@ -33,7 +38,7 @@ CENTER_SQUARES = {
     chess.E5,
 }
 
-DEFAULT_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
+DEFAULT_MODEL = os.getenv("CHESS_TEACHER_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
 TOKEN_FILE_NAME = "api_token.txt"
 DEFAULT_ROUTER_TIMEOUT = 60
 
@@ -1028,12 +1033,54 @@ def safe_json_loads(text: str) -> Optional[dict]:
         return None
 
 
+def _ollama_generate(prompt: str, model: str, max_new_tokens: int, temperature: float) -> str:
+    """Local LLM via Ollama's OpenAI-compatible endpoint (free, offline)."""
+    base = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+    url = f"{base}/v1/chat/completions"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_new_tokens,
+        "temperature": temperature,
+        "top_p": 0.9,
+        "stream": False,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    timeout_seconds = int(os.getenv("OLLAMA_TIMEOUT", "120"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8") if exc.fp else ""
+        raise RuntimeError(f"Ollama error {exc.code}: {detail}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError(f"Cannot reach Ollama at {base} ({exc}). Run 'ollama serve'.") from exc
+    try:
+        parsed = json.loads(body)
+        text = parsed["choices"][0]["message"]["content"]
+    except (json.JSONDecodeError, KeyError, IndexError) as exc:
+        raise RuntimeError("Unexpected Ollama response") from exc
+    if not text:
+        raise RuntimeError("Empty Ollama response")
+    return str(text).strip()
+
+
+def _llm_backend() -> str:
+    return os.getenv("CHESS_TEACHER_LLM", "hf").strip().lower()
+
+
 def hf_generate(
     prompt: str,
     model: str,
     max_new_tokens: int = 512,
     temperature: float = 0.2,
 ) -> str:
+    # Local backend (Ollama) when configured — free, offline, no HF credits needed.
+    if _llm_backend() in ("ollama", "local"):
+        return _ollama_generate(prompt, model, max_new_tokens, temperature)
     if InferenceClient is None:
         raise RuntimeError("huggingface_hub is not installed. Run 'pip install huggingface_hub'.")
     token = load_hf_token()
@@ -1498,7 +1545,7 @@ def attention_model_block(board: chess.Board, timeout: float = 30.0) -> Optional
     return data["prompt_block"]
 
 
-def build_ground_truth_block(board: chess.Board) -> str:
+def build_ground_truth_block(board: chess.Board, include_attention: bool = True) -> str:
     """Assemble every deterministic board-state section into one block. Order is
     chosen to put the most concrete (placement, attacks, defenses) before the more
     interpretive (tactical motifs, structural assessment)."""
@@ -1528,8 +1575,23 @@ def build_ground_truth_block(board: chess.Board) -> str:
         f"King-zone threats:\n{king_zone_text}\n\n"
         f"Position facts (tactical: hanging vs defended):\n{position_facts_text}\n\n"
         f"Strategic facts (positional structure):\n{strategic_text}"
-        + _attention_section(board)
+        + _concepts_section(board)
+        + (_attention_section(board) if include_attention else "")
     )
+
+
+def _concepts_section(board: chess.Board) -> str:
+    """Deterministic detected chess concepts (tactics, structures, plans, endgame,
+    mates) from chess_concepts.py — verified from the board, safe for the LLM to cite."""
+    if _concepts is None:
+        return ""
+    try:
+        block = _concepts.format_concepts_for_prompt(board)
+    except Exception:
+        return ""
+    if not block:
+        return ""
+    return "\n\n" + block
 
 
 def _attention_section(board: chess.Board) -> str:
@@ -1595,30 +1657,526 @@ def basic_explain(
     return " ".join(parts)
 
 
+def _cp_of(score: Dict[str, int]) -> int:
+    if score.get("mate") is not None:
+        return 100000 if score["mate"] > 0 else -100000
+    return score.get("cp", 0)
+
+
+def _landing_features(board: chess.Board, san: str):
+    """Deterministic practical features of the position AFTER playing ``san``:
+    whether the moved piece lands defended/loose, central, shields the king, develops,
+    and whether it was under attack before (a rescue)."""
+    b = board.copy()
+    try:
+        mv = parse_move(b, san)
+    except ValueError:
+        return None
+    color = b.turn
+    from_sq = mv.from_square
+    moved = b.piece_at(from_sq)
+    was_hanging = (
+        moved is not None and moved.piece_type != chess.KING
+        and static_exchange_eval(board, from_sq, not color) > 0
+    )
+    b.push(mv)
+    to = mv.to_square
+    piece = b.piece_at(to)
+    if piece is None:
+        return None
+    defenders = [s for s in b.attackers(color, to) if b.piece_at(s)]
+    defender_types = {b.piece_at(s).piece_type for s in defenders}
+    defender_names = sorted({chess.piece_name(pt) for pt in defender_types})
+    solid_defenders = sorted({chess.piece_name(pt) for pt in defender_types
+                              if pt in (chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK)})
+    # 'solid' = held by a pawn/minor/rook (cheap, ideal); queen/king-only defence is weak.
+    solid_defense = len(solid_defenders) > 0
+    queen_only = bool(defenders) and not solid_defense
+    f, r = chess.square_file(to), chess.square_rank(to)
+    ksq = b.king(color)
+    king_ring = set()
+    if ksq is not None:
+        kf, kr = chess.square_file(ksq), chess.square_rank(ksq)
+        for df in (-1, 0, 1):
+            for dr in (-1, 0, 1):
+                nf, nr = kf + df, kr + dr
+                if 0 <= nf <= 7 and 0 <= nr <= 7:
+                    king_ring.add(chess.square(nf, nr))
+    feats = {
+        "from": from_sq,
+        "to": to,
+        "piece": chess.piece_name(piece.piece_type),
+        "defended": len(defenders) > 0,
+        "defender_names": defender_names,
+        "solid_defenders": solid_defenders,
+        "solid_defense": solid_defense,
+        "queen_only": queen_only,
+        "loose": len(defenders) == 0,
+        "central": 2 <= f <= 5 and 2 <= r <= 5,
+        "shields_king": bool(set(b.attacks(to)) & king_ring),
+        "develops": chess.square_rank(from_sq) in (0, 7)
+        and moved is not None and moved.piece_type in (chess.KNIGHT, chess.BISHOP),
+        "was_hanging": was_hanging,
+    }
+    # practicality score: solid defence and king shelter make a move easier/safer to play.
+    score = 0.0
+    if feats["solid_defense"]:
+        score += 2
+    elif feats["queen_only"]:
+        score += 0.5
+    if feats["loose"]:
+        score -= 1
+    if feats["shields_king"]:
+        score += 1
+    if feats["develops"]:
+        score += 1
+    if feats["central"]:
+        score += 0.5
+    feats["practicality"] = score
+    return feats
+
+
+def _solidity_phrase(f) -> str:
+    if f["solid_defense"]:
+        return f"defended by {' and '.join('the ' + n for n in f['solid_defenders'])}"
+    if f["queen_only"]:
+        return "held only by the queen (which ties the queen to its defence)"
+    return f"left undefended on {chess.square_name(f['to'])}"
+
+
+def practical_comparison(board: chess.Board, best_san: str, best_score: Dict[str, int],
+                         alt_san: str, alt_score: Dict[str, int]) -> Optional[str]:
+    """Practical, human-oriented comparison of two near-equal moves from deterministic
+    board features. Scores each for solidity/king-shelter/development and recommends
+    whichever is easier to play — which may be the engine's move OR the alternative."""
+    if best_san == alt_san:
+        return None
+    fb = _landing_features(board, best_san)
+    fa = _landing_features(board, alt_san)
+    if not fb or not fa:
+        return None
+
+    parts: List[str] = []
+    if fb["from"] == fa["from"] and fb["was_hanging"]:
+        parts.append(
+            f"Both {best_san} and {alt_san} rescue the {fb['piece']}, and the engine "
+            f"rates them about equal ({format_score(best_score)} vs {format_score(alt_score)})."
+        )
+    else:
+        parts.append(
+            f"{alt_san} ({format_score(alt_score)}) is essentially as good as "
+            f"{best_san} ({format_score(best_score)})."
+        )
+
+    # Recommend the more practical move (higher solidity/king-safety score).
+    if fa["practicality"] > fb["practicality"] + 0.75:
+        prac, prac_san, other, other_san = fa, alt_san, fb, best_san
+    elif fb["practicality"] > fa["practicality"] + 0.75:
+        prac, prac_san, other, other_san = fb, best_san, fa, alt_san
+    else:
+        parts.append("Both are sound and about equally practical — play whichever you understand better.")
+        return " ".join(parts)
+
+    virtues = [_solidity_phrase(prac)]
+    if prac["shields_king"] and not other["shields_king"]:
+        virtues.append("it also helps guard your king")
+    if prac["develops"] and not other["develops"]:
+        virtues.append("it's a natural developing square")
+    parts.append(
+        f"{prac_san} is the more practical, solid choice: the {prac['piece']} is "
+        + ", ".join(virtues) + "."
+    )
+
+    downside = _solidity_phrase(other)
+    extra = " though it sits on a slightly more active square" if other["central"] and not prac["central"] else ""
+    parts.append(f"{other_san} is fine too, but there the {other['piece']} is {downside}{extra}.")
+    parts.append(f"With near-equal evaluations, {prac_san} is the easier move to play for a human.")
+    return " ".join(parts)
+
+
+def _near_equal_alt(engine_lines: List[LineResult], margin_cp: int = 60):
+    """Return the best alternative first-move line within margin of the top line."""
+    if not engine_lines or not engine_lines[0].moves:
+        return None
+    best_cp = _cp_of(engine_lines[0].score)
+    top_move = engine_lines[0].moves[0]
+    for line in engine_lines[1:]:
+        if line.moves and line.moves[0] != top_move and best_cp - _cp_of(line.score) <= margin_cp:
+            return line
+    return None
+
+
+def format_move_verdict(
+    board: chess.Board,
+    move_line: LineResult,
+    engine_lines: List[LineResult],
+) -> str:
+    """Deterministic, correct plain-English verdict for a specific move, built ONLY
+    from labeled engine moves + verified per-move tags + the evaluation. Avoids the
+    LLM misreading squares/targets when explaining 'why not X'."""
+    side = "White" if board.turn == chess.WHITE else "Black"
+    opp = "Black" if board.turn == chess.WHITE else "White"
+    labeled = format_moves_with_sides(board, move_line.moves[:6])
+    h_score = format_score(move_line.score)
+    h_cp = _cp_of(move_line.score)
+    first = move_line.moves[0] if move_line.moves else "the move"
+    reply = move_line.moves[1] if len(move_line.moves) > 1 else None
+
+    # Immediate refutation, drawn straight from the labeled line + verified tags.
+    cap_tag = None
+    for t in (move_line.tags or []):
+        if t.get("ply") == 2:
+            caps = [x for x in t.get("tags", []) if "captures" in x]
+            cap_tag = caps[0] if caps else None
+            break
+
+    parts: List[str] = []
+    best = engine_lines[0] if engine_lines else None
+    is_best = bool(best and best.moves and best.moves[0] == first)
+    if is_best:
+        parts.append(f"{first} is actually the engine's top move here ({h_score} for {side}).")
+        parts.append(f"Main line: {labeled}.")
+        alt = _near_equal_alt(engine_lines)
+        if alt is not None:
+            pc = practical_comparison(board, first, move_line.score, alt.moves[0], alt.score)
+            if pc:
+                parts.append(pc)
+    elif best and best.moves:
+        b_score = format_score(best.score)
+        delta = _cp_of(best.score) - h_cp  # >0 => the move is worse for the side to move
+        if delta >= 150:
+            verdict = f"is clearly worse for {side}"
+        elif delta >= 50:
+            verdict = f"is a bit worse for {side} than the top move"
+        elif delta <= -50:
+            verdict = "is at least as good as the engine's top move"
+        else:
+            verdict = "is about as good as the top move"
+        parts.append(f"{first} {verdict}.")
+        if reply and cap_tag and delta >= 50:
+            parts.append(
+                f"The point: after {first}, {opp} plays {reply} ({cap_tag}), so {side} "
+                f"comes out worse."
+            )
+        elif reply and cap_tag:
+            parts.append(f"After {first}, {opp} replies {reply} ({cap_tag}).")
+        parts.append(
+            f"The engine puts this at {h_score} for {side}, versus {b_score} after the "
+            f"best move {best.moves[0]}. Full line: {labeled}."
+        )
+        # If the asked move is essentially as good, add the practical comparison.
+        if delta <= 60:
+            pc = practical_comparison(board, best.moves[0], best.score, first, move_line.score)
+            if pc:
+                parts.append(pc)
+    else:
+        # No reference line supplied — judge from the move's own evaluation.
+        if h_cp <= -150:
+            verdict = f"is bad for {side} — it drops material"
+        elif h_cp >= 150:
+            verdict = f"is strong for {side}"
+        else:
+            verdict = f"keeps roughly balanced play for {side}"
+        parts.append(f"{first} {verdict} ({h_score} for {side}).")
+        if reply and cap_tag:
+            parts.append(f"The point: after {first}, {opp} plays {reply} ({cap_tag}).")
+        parts.append(f"Full line: {labeled}.")
+    return " ".join(parts)
+
+
+_MOVE_TOKEN_RE = re.compile(
+    r"\b(O-O-O|O-O|[NBRQK][a-h]?[1-8]?x?[a-h][1-8](?:=[NBRQ])?[+#]?|"
+    r"[a-h]x[a-h][1-8](?:=[NBRQ])?[+#]?|[a-h][1-8][a-h][1-8][nbrq]?)\b"
+)
+
+
+def _illegal_move_note(board: chess.Board, question: str) -> Optional[str]:
+    """If the question references a move-like token that is NOT legal here, return a
+    short clarification (e.g. a self-capture like 'Nxe4' onto your own piece), instead
+    of letting the LLM invent an explanation for an impossible move."""
+    for m in _MOVE_TOKEN_RE.finditer(question):
+        tok = m.group(0)
+        try:
+            parse_move(board, tok)
+            continue  # it's legal; handled elsewhere
+        except ValueError:
+            pass
+        sqm = re.search(r"([a-h][1-8])(?:=[NBRQ])?[+#]?$", tok)
+        if sqm and "x" in tok:
+            target = chess.parse_square(sqm.group(1))
+            p = board.piece_at(target)
+            if p is not None and p.color == board.turn:
+                return (
+                    f"{tok} isn't possible — {sqm.group(1)} has your own "
+                    f"{chess.piece_name(p.piece_type)}, so there is nothing to capture there."
+                )
+            if p is None:
+                return f"{tok} isn't legal here — there is no enemy piece on {sqm.group(1)} to capture."
+        return f"{tok} isn't a legal move in this position."
+    return None
+
+
+def _best_move_question(q: str) -> bool:
+    ql = q.lower()
+    keys = (
+        "best move", "best continuation", "strongest move", "what should i play",
+        "what should black play", "what should white play", "what to play",
+        "what move should", "what do i play", "what is the best", "what's the best",
+        "how should i continue", "what should i do", "what's best",
+    )
+    return any(k in ql for k in keys)
+
+
+def describe_best_move(board: chess.Board, engine_lines: List[LineResult]) -> Optional[str]:
+    """Deterministic, correct description of the engine's best move: mechanics are read
+    from the board (capture / retreat-to-safety / develop / castle / check), never from
+    the LLM — so it can't invent 'captures' or the wrong owner."""
+    if not engine_lines or not engine_lines[0].moves:
+        return None
+    best = engine_lines[0]
+    san = best.moves[0]
+    b = board.copy()
+    try:
+        mv = parse_move(b, san)
+    except ValueError:
+        return None
+    side = "White" if board.turn == chess.WHITE else "Black"
+    piece = b.piece_at(mv.from_square)
+    pn = chess.piece_name(piece.piece_type) if piece else "piece"
+    from_sq = chess.square_name(mv.from_square)
+    to_sq = chess.square_name(mv.to_square)
+    parts = [f"The best move is {san} ({format_score(best.score)} for {side})."]
+
+    if piece and piece.piece_type == chess.KING and \
+            abs(chess.square_file(mv.from_square) - chess.square_file(mv.to_square)) >= 2:
+        parts.append(f"{side} castles — getting the king to safety and connecting the rooks.")
+    elif mv.promotion:
+        parts.append(f"The pawn promotes on {to_sq}.")
+    elif b.is_capture(mv):
+        if b.is_en_passant(mv):
+            parts.append(f"It captures a pawn en passant on {to_sq}.")
+        else:
+            cap = b.piece_at(mv.to_square)
+            capn = chess.piece_name(cap.piece_type) if cap else "piece"
+            gain = static_exchange_eval(board, mv.to_square, board.turn)
+            tail = ", winning material" if gain > 0 else ""
+            parts.append(f"It captures the {capn} on {to_sq}{tail}.")
+    else:
+        # non-capture: was the moved piece itself under attack (a save)?
+        was_hanging = piece is not None and piece.piece_type != chess.KING and \
+            static_exchange_eval(board, mv.from_square, not board.turn) > 0
+        if was_hanging:
+            parts.append(
+                f"It moves the {pn} from {from_sq} — which was under attack — to safety "
+                f"on {to_sq} (this is a retreat, not a capture)."
+            )
+        elif piece and piece.piece_type == chess.PAWN:
+            parts.append(f"It advances the pawn to {to_sq}.")
+        elif piece and piece.piece_type in (chess.KNIGHT, chess.BISHOP) and \
+                chess.square_rank(mv.from_square) in (0, 7):
+            parts.append(f"It develops the {pn} to {to_sq}.")
+        else:
+            parts.append(f"It repositions the {pn} to {to_sq}.")
+    if b.gives_check(mv):
+        parts.append("It comes with check.")
+    if len(best.moves) > 1:
+        parts.append(f"Main line: {format_moves_with_sides(board, best.moves[:4])}.")
+    # Offer a near-equal alternative with a practical note, when one exists.
+    alt = _near_equal_alt(engine_lines)
+    if alt is not None:
+        pc = practical_comparison(board, best.moves[0], best.score, alt.moves[0], alt.score)
+        if pc:
+            parts.append(pc)
+    return " ".join(parts)
+
+
+def _why_move_question(board: chess.Board, q: str) -> bool:
+    """True for 'why is this move good / why trade / what's the idea' questions
+    (as opposed to 'why NOT X' or 'is X bad', which are verdict questions)."""
+    ql = q.lower()
+    if "why not" in ql:
+        return False
+    if any(w in ql for w in (" bad", " worse", "blunder", "mistake", "instead of")):
+        return False
+    has_why = ("why" in ql or "idea" in ql or "purpose" in ql or "point of" in ql
+               or "reason" in ql)
+    if not has_why:
+        return False
+    move_kw = any(k in ql for k in (
+        "trade", "captur", "take", "sacrific", " sac", "give up", "this move",
+        "that move", "the move", "best move", "develop", "play"))
+    return move_kw or bool(find_prompt_moves(q, board))
+
+
+def describe_why_move(board: chess.Board, move_san: str,
+                      engine_lines: List[LineResult]) -> Optional[str]:
+    """Deterministic 'why is this move good' explanation: material/trade outcome,
+    bishop-pair swing (computed before vs after the trade), saves/develops/check, and
+    the eval + main line. Built only from the board + engine line, so it can't invent
+    captures, piece placements, or purposes."""
+    b = board.copy()
+    try:
+        mv = parse_move(b, move_san)
+    except ValueError:
+        return None
+    color = board.turn
+    side = "White" if color == chess.WHITE else "Black"
+    piece = b.piece_at(mv.from_square)
+    if piece is None:
+        return None
+    pn = chess.piece_name(piece.piece_type)
+    to = chess.square_name(mv.to_square)
+    is_cap = b.is_capture(mv)
+    captured_pt = None
+    if is_cap and not b.is_en_passant(mv):
+        cp = b.piece_at(mv.to_square)
+        captured_pt = cp.piece_type if cp else None
+    was_hanging = (piece.piece_type != chess.KING
+                   and static_exchange_eval(board, mv.from_square, not color) > 0)
+
+    line = None
+    for l in engine_lines:
+        if l.moves and l.moves[0] == move_san:
+            line = l
+            break
+    score_txt = format_score(line.score) if line else None
+
+    def bcount(bd, c):
+        return len(bd.pieces(chess.BISHOP, c))
+
+    my_before, opp_before = bcount(board, color), bcount(board, not color)
+    b2 = board.copy()
+    b2.push(mv)
+    if line and len(line.moves) >= 2:  # apply the forced recapture/reply
+        try:
+            b2.push(parse_move(b2, line.moves[1]))
+        except ValueError:
+            pass
+    my_after, opp_after = bcount(b2, color), bcount(b2, not color)
+
+    parts: List[str] = []
+    if captured_pt is not None:
+        capn = chess.piece_name(captured_pt)
+        see = static_exchange_eval(board, mv.to_square, color)
+        if piece.piece_type == chess.KNIGHT and captured_pt == chess.BISHOP:
+            parts.append(f"{move_san} trades the knight for the {capn}.")
+        elif piece.piece_type == chess.BISHOP and captured_pt == chess.KNIGHT:
+            parts.append(f"{move_san} trades the bishop for the {capn}.")
+        elif see > 0:
+            parts.append(f"{move_san} captures the {capn} on {to}, winning material.")
+        else:
+            parts.append(f"{move_san} captures the {capn} on {to} (an even trade).")
+    elif was_hanging:
+        parts.append(f"{move_san} brings the {pn} to safety on {to} (it was under attack).")
+    elif piece.piece_type in (chess.KNIGHT, chess.BISHOP) and chess.square_rank(mv.from_square) in (0, 7):
+        parts.append(f"{move_san} develops the {pn} to {to}.")
+    else:
+        parts.append(f"{move_san} is the engine's top choice here.")
+
+    # The key positional point for many trades: the bishop pair.
+    if my_before == 2 and my_after == 2 and opp_before == 2 and opp_after == 1:
+        parts.append(
+            f"The main point is the bishop pair: after the trade {side} keeps both "
+            f"bishops while the opponent is left with just one — a lasting positional plus."
+        )
+    elif opp_before == 2 and opp_after == 1 and my_after >= my_before and my_after >= 2:
+        parts.append(f"It also leaves {side} with two bishops against one.")
+
+    if b2.is_check():
+        parts.append("The follow-up also comes with tempo (a check).")
+
+    if line and score_txt:
+        cont = format_moves_with_sides(board, line.moves[:4])
+        parts.append(f"The engine rates it {score_txt} for {side}. Main line: {cont}.")
+    return " ".join(parts)
+
+
+def _try_move_verdict(
+    board: chess.Board,
+    question: str,
+    engine_lines: List[LineResult],
+    extra_lines: List[LineResult],
+    model: str,
+) -> Optional[str]:
+    """If the question is about a specific move we have an engine line for, return a
+    deterministic (hallucination-proof) verdict, lightly polished by the LLM with a
+    strict 'change no facts' instruction (falls back to the raw verdict)."""
+    prompt_moves = find_prompt_moves(question, board)
+    if not prompt_moves:
+        return None
+    target = set(prompt_moves)
+    match = None
+    # Search supplied candidate/hypothetical lines first, then the engine lines
+    # (the asked move may already BE an engine top line, which build_hypothetical_lines
+    # skips — that previously fell through to the hallucinating LLM path).
+    for line in list(extra_lines) + list(engine_lines):
+        if line.moves and line.moves[0] in target:
+            match = line
+            break
+    if match is None:
+        return None
+    # Return the deterministic verdict directly: it is built only from labeled engine
+    # moves + verified tags + evaluation, so it cannot mis-attribute or invent motifs.
+    # (An LLM 'polish' pass was tried and reliably re-introduced errors, so it's off.)
+    return format_move_verdict(board, match, engine_lines)
+
+
 def llm_explain(
     board: chess.Board,
     prompt: str,
     engine_lines: List[LineResult],
     candidate_lines: List[LineResult],
     model: str,
+    include_attention: bool = True,
 ) -> str:
+    # 'Why is this move good / why trade / what's the idea' -> deterministic why-answer.
+    if _why_move_question(board, prompt):
+        pm = find_prompt_moves(prompt, board)
+        mv_san = pm[0] if pm else (engine_lines[0].moves[0] if engine_lines and engine_lines[0].moves else None)
+        if mv_san:
+            why = describe_why_move(board, mv_san, engine_lines)
+            if why:
+                return why
+    # Direct move questions ('why not X', 'is X good') get a deterministic verdict.
+    verdict = _try_move_verdict(board, prompt, engine_lines, candidate_lines, model)
+    if verdict is not None:
+        return verdict
+    # 'What is the best move?' also gets a deterministic, mechanics-correct answer.
+    if _best_move_question(prompt):
+        bm = describe_best_move(board, engine_lines)
+        if bm is not None:
+            return bm
+    illegal = _illegal_move_note(board, prompt)
+    if illegal is not None:
+        return illegal
     engine_text = "\n".join(
         f"{idx + 1}) {format_score(line.score)}: {format_moves_with_sides(board, line.moves)}"
         for idx, line in enumerate(engine_lines)
     )
 
     candidate_text = "\n".join(format_line_for_prompt(board, line) for line in candidate_lines)
-    ground_truth = build_ground_truth_block(board)
+    ground_truth = build_ground_truth_block(board, include_attention)
     anchor = best_move_anchor(board, engine_lines)
     side_name = "White" if board.turn == chess.WHITE else "Black"
     opponent_name = "Black" if board.turn == chess.WHITE else "White"
 
     expl_prompt = (
-        "You are a chess coach. Answer with explanation only.\n\n"
-        "{anchor}\n\n"
-        "TASK: Explain why this specific engine move is best for {side}, and why any "
-        "alternative the user asked about fails if applicable. Do NOT propose moves "
-        "for the other side first — the position has already been reached. Do NOT "
+        "You are a chess coach. ANSWER THE USER'S QUESTION directly and specifically.\n\n"
+        "USER QUESTION: {question}\n\n"
+        "HOW TO ANSWER: Your FIRST sentence must directly answer the question asked. "
+        "Then support it with the verified facts below. Match your focus to the question:\n"
+        "- 'what opening / what is this position from' -> name it from the 'Opening:' line "
+        "under Chess concepts detected (or say it is not identified); never guess.\n"
+        "- 'why can't I play X' / 'is X good/bad' -> evaluate THAT move using the Engine "
+        "top lines and Candidate lines, compare scores, and state what refutes it.\n"
+        "- 'what should I play' / 'what should I think about' / plans -> give the main "
+        "plan(s) from the Strategic facts and Chess concepts detected; you may cite the "
+        "engine's top move as the concrete step.\n"
+        "- any other positional question -> answer it from the ground truth below.\n"
+        "Do NOT default to explaining the engine's best move unless the question asks "
+        "what to play or why a move is best.\n"
+        "Reference (engine's current top choice — mention only if relevant): {anchor}\n"
+        "Do NOT propose moves for the other side first. Do NOT "
         "invent moves; only reference moves that appear in the Engine top lines or "
         "Candidate lines below. Do NOT claim a piece attacks another piece unless "
         "that relationship appears in the Piece attacks section. Do NOT claim a piece "
@@ -1638,6 +2196,18 @@ def llm_explain(
         "exactly. Only call a piece 'hanging' if it appears as HANGING in Position "
         "facts. Pieces listed as DEFENDED are NOT hanging. Do not contradict these "
         "facts.\n"
+        "OPENING: Only name the opening or variation if an 'Opening:' line appears in "
+        "the Chess concepts detected section, and use that exact name. If none is given, "
+        "do NOT guess or name any opening.\n"
+        "CONCEPTS: You may cite items in the 'Chess concepts detected' section verbatim; "
+        "do not invent concepts, structures, or motifs that are not listed.\n"
+        "MOVE PURPOSE: Do NOT invent why a move is played (pin, fork, 'opens lines', "
+        "'attacks the queen') unless it appears in the tags, the Piece attacks section, "
+        "or the Chess concepts. When you cite a move from a line, attribute it to the "
+        "side shown in its 'White:'/'Black:' label — never the wrong side.\n"
+        "STYLE: Write naturally, as a coach talking to a student. Do NOT mention "
+        "'ground truth', 'Chess concepts detected', 'the section', or say facts were "
+        "'detected/verified' — just state them as chess knowledge.\n"
         "Avoid listing full move sequences or tags; mention at most one short line (up to 4 plies).\n"
         "Keep the answer focused and practical in 2-4 short paragraphs.\n\n"
         "Position FEN: {fen}\n"
@@ -1660,14 +2230,16 @@ def llm_explain(
     response = hf_generate(expl_prompt, model=model, max_new_tokens=384, temperature=0.3)
     if response_needs_rewrite(response):
         rewrite_prompt = (
-            "Rewrite the answer into a concise explanation.\n\n"
-            "{anchor}\n\n"
+            "Rewrite the answer so it DIRECTLY answers the user's question below, "
+            "in 2-4 sentences.\n\n"
             "Do not list or enumerate move lines or tags.\n"
-            "Use 2-4 sentences. Mention at most one key line (up to 4 plies).\n"
-            "Explain the engine's best move named above; do not invent other moves.\n"
+            "Lead with a direct answer to the question; do not default to describing "
+            "the engine's best move unless the question asks what to play or why a move "
+            "is best. Do not invent moves.\n"
+            "Reference (engine top choice, cite only if relevant): {anchor}\n"
             "Do not claim attacks, defenses, pins, forks, or piece placements that "
-            "aren't in the Ground truth sections.\n"
-            "When relevant, include one positional theme drawn from the Strategic facts.\n"
+            "aren't in the Ground truth sections. Only name an opening if an 'Opening:' "
+            "line is given.\n"
             "No headings.\n\n"
             "Position FEN: {fen}\n"
             "Side to move: {side}\n"
@@ -1705,7 +2277,31 @@ def llm_followup(
     candidate_lines: List[LineResult],
     model: str,
     hypothetical_lines: Optional[List[LineResult]] = None,
+    include_attention: bool = True,
 ) -> str:
+    # 'Why is this move good / why trade / what's the idea' -> deterministic why-answer.
+    if _why_move_question(board, question):
+        pm = find_prompt_moves(question, board)
+        mv_san = pm[0] if pm else (engine_lines[0].moves[0] if engine_lines and engine_lines[0].moves else None)
+        if mv_san:
+            why = describe_why_move(board, mv_san, engine_lines)
+            if why:
+                return why
+    # Direct move questions get the deterministic, hallucination-proof verdict.
+    verdict = _try_move_verdict(
+        board, question, engine_lines,
+        list(hypothetical_lines or []) + list(candidate_lines), model,
+    )
+    if verdict is not None:
+        return verdict
+    if _best_move_question(question) and engine_lines:
+        bm = describe_best_move(board, engine_lines)
+        if bm is not None:
+            return bm
+    illegal = _illegal_move_note(board, question)
+    if illegal is not None:
+        return illegal
+
     engine_text = "\n".join(
         f"{idx + 1}) {format_score(line.score)}: {format_moves_with_sides(board, line.moves)}"
         for idx, line in enumerate(engine_lines)
@@ -1715,7 +2311,7 @@ def llm_followup(
         format_line_for_prompt(board, line) for line in (hypothetical_lines or [])
     )
     history_text = format_history_for_prompt(history)
-    ground_truth = build_ground_truth_block(board)
+    ground_truth = build_ground_truth_block(board, include_attention)
     anchor = best_move_anchor(board, engine_lines)
     side_name = "White" if board.turn == chess.WHITE else "Black"
     opponent_name = "Black" if board.turn == chess.WHITE else "White"
@@ -1734,16 +2330,31 @@ def llm_followup(
         "The first move belongs to {side}; the second to {opponent}; alternating. Do "
         "NOT claim {side} plays a move that is labeled '{opponent}:' or vice versa.\n"
         "HYPOTHETICAL LINES: when the user asks 'what about move X' or 'isn't X bad', "
-        "the Hypothetical lines section already shows the engine's response IF that "
-        "move were played. Use those lines as your factual basis. Compare the "
-        "hypothetical's evaluation against the engine's top line to explain whether "
-        "the user's idea works.\n"
+        "the Hypothetical lines section shows the engine's response IF that move were "
+        "played. Use ONLY that line as your factual basis. Every move is labeled "
+        "'White:' or 'Black:' with its move number — attribute each move to EXACTLY that "
+        "side (e.g. 'Black: 8...d5' means BLACK played d5; never say White played it). "
+        "Lead with the IMMEDIATE refutation (usually White's very next reply, e.g. the "
+        "recapture) and the final evaluation; that is what makes the move good or bad. "
+        "Do NOT narrate the deep tail move-by-move.\n"
+        "MOVE PURPOSE: Do NOT invent why a move is played (pin, fork, 'opens lines', "
+        "'creates a threat', 'attacks the queen') unless that appears in the tags, the "
+        "Piece attacks section, or the Chess concepts. If you don't know a move's "
+        "purpose, just state whose move it is and the resulting evaluation.\n"
         "When the question is structural/strategic (plans, piece trades, pawn breaks, "
         "long-term assessment), draw on the Strategic facts.\n"
         "GROUND TRUTH: Every section below the 'Ground truth' header is computed "
         "exactly. Only call a piece 'hanging' if it appears as HANGING in Position "
         "facts. Pieces listed as DEFENDED are NOT hanging. Do not contradict these "
         "facts.\n"
+        "OPENING: Only name the opening or variation if an 'Opening:' line appears in "
+        "the Chess concepts detected section, and use that exact name. If none is given, "
+        "do NOT guess or name any opening.\n"
+        "CONCEPTS: You may cite items in the 'Chess concepts detected' section verbatim; "
+        "do not invent concepts, structures, or motifs that are not listed.\n"
+        "STYLE: Write naturally, as a coach talking to a student. Do NOT mention "
+        "'ground truth', 'Chess concepts detected', 'the section', or say facts were "
+        "'detected/verified' — just state them as chess knowledge.\n"
         "Avoid listing full move sequences or tags; mention at most one short line (up to 4 plies).\n"
         "Keep the answer focused and practical in 2-4 short paragraphs.\n\n"
         "Position FEN: {fen}\n"

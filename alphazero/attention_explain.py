@@ -115,16 +115,17 @@ def format_report_for_prompt(report: Dict) -> str:
     if not report.get("top_moves"):
         return "Attention model: no legal moves."
     lines = [
-        f"Model value (side to move): {report['value']:+.2f} "
-        f"(>0 favours side to move)",
-        "Model top moves: "
+        "Attention model (neural bot) — attention-weighted board state:",
+        f"- value (side to move): {report['value']:+.2f} (>0 favours side to move)",
+        "- policy top moves: "
         + ", ".join(f"{m['uci']} ({m['prob']:.0%})" for m in report["top_moves"]),
     ]
     vs = ", ".join(f"{s['square']}({s['piece']})" for s in report["value_saliency"])
     ms = ", ".join(f"{s['square']}({s['piece']})" for s in report["move_saliency"])
-    lines.append(f"Squares most influencing the model's evaluation: {vs}")
+    lines.append(f"- squares the value head attends to most: {vs}")
     lines.append(
-        f"Squares the model links to move {report['chosen_move']}: {ms}"
+        f"- squares the attention-weighted policy links to its move "
+        f"{report['chosen_move']}: {ms}"
     )
     return "\n".join(lines)
 

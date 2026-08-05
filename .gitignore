@@ -4,4 +4,15 @@
 /frontend/node_modules
 /frontend/dist
 /frontend/.env*
-/api/__pycache__
+
+# python caches
+__pycache__/
+*.pyc
+
+# logs (backend/frontend/training/data-gen)
+*.log
+
+# alphazero: local torch venv, cloned reference repo, generated images/artifacts
+/alphazero/.venv
+/alphazero/refs/
+/alphazero/saliency_*.png

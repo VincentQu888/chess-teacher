@@ -17,6 +17,8 @@ class AnalyzeRequest(BaseModel):
     threads: int = 4
     max_candidates: int = 3
     llm: bool = True
+    llm_candidates: bool = False  # extra LLM call to brainstorm candidate moves (slow)
+    attention: bool = True  # include the neural-net attention-weighted board state
     model: Optional[str] = None
 
 
@@ -32,6 +34,7 @@ class ChatRequest(BaseModel):
     history: List[ChatMessage] = []
     engine_lines: List[dict] = []
     candidate_lines: List[dict] = []
+    attention: bool = True  # include the neural-net attention-weighted board state
     model: Optional[str] = None
 
 
@@ -96,6 +99,8 @@ def analyze(request: AnalyzeRequest) -> dict:
             request.top,
             request.pv_plies,
         )
+        # Engine multipv + user-mentioned moves already supply candidate lines;
+        # skip the extra (slow) LLM candidate-generation call. Opt in via `llm_candidates`.
         candidate_lines = ct.build_candidate_lines(
             board,
             engine,
@@ -104,7 +109,7 @@ def analyze(request: AnalyzeRequest) -> dict:
             request.pv_plies,
             request.max_candidates,
             model,
-            enable_llm=request.llm,
+            enable_llm=request.llm_candidates,
         )
 
         llm_answer = None
@@ -117,6 +122,7 @@ def analyze(request: AnalyzeRequest) -> dict:
                     engine_lines,
                     candidate_lines,
                     model,
+                    include_attention=request.attention,
                 )
             except RuntimeError as exc:
                 llm_error = str(exc)
@@ -164,6 +170,10 @@ def chat(request: ChatRequest) -> dict:
         try:
             with ct.chess.engine.SimpleEngine.popen_uci(str(engine_path)) as engine:
                 engine.configure({"Threads": 4})
+                # If the client didn't pass engine lines, compute them so the
+                # deterministic answer paths (best move / verdict / why-move) work.
+                if not engine_lines:
+                    engine_lines = ct.engine_top_lines(board, engine, 14, 3, 10)
                 hypothetical_lines = ct.build_hypothetical_lines(
                     board,
                     engine,
@@ -186,6 +196,7 @@ def chat(request: ChatRequest) -> dict:
             candidate_lines,
             model,
             hypothetical_lines=hypothetical_lines,
+            include_attention=request.attention,
         )
         error = None
     except RuntimeError as exc:

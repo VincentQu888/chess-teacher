@@ -115,6 +115,7 @@ export default function App() {
   const [arrowStart, setArrowStart] = useState(null);
   const [arrowPreview, setArrowPreview] = useState(null);
   const [highlights, setHighlights] = useState([]);
+  const [useAttention, setUseAttention] = useState(true);
 
   const board = useMemo(() => parseFen(gameFen), [gameFen]);
 
@@ -290,6 +291,18 @@ export default function App() {
     clearAnnotations();
   };
 
+  const undoMove = () => {
+    const undone = gameRef.current.undo();
+    if (!undone) return;
+    const updated = gameRef.current.fen();
+    setGameFen(updated);
+    setFenInput(updated);
+    setFenError("");
+    setActiveSquare(null);
+    setLegalTargets([]);
+    clearAnnotations();
+  };
+
   const handleRun = async () => {
     setLoading(true);
     setError("");
@@ -319,6 +332,7 @@ export default function App() {
           fen: gameRef.current.fen(),
           moves: moveList.length ? moveList : null,
           prompt,
+          attention: useAttention,
         }),
       });
 
@@ -368,6 +382,7 @@ export default function App() {
           history: chatMessages,
           engine_lines: result.engine_lines || [],
           candidate_lines: result.candidate_lines || [],
+          attention: useAttention,
         }),
       });
 
@@ -539,9 +554,20 @@ export default function App() {
             >
               Apply FEN to board
             </button>
-            <button type="button" className="ghost" onClick={resetToStart}>
-              Reset to starting position
-            </button>
+            <div className="button-row">
+              <button
+                type="button"
+                className="ghost"
+                onClick={undoMove}
+                disabled={gameRef.current.history().length === 0}
+                title="Take back the last move played on the board"
+              >
+                ↩ Undo move
+              </button>
+              <button type="button" className="ghost" onClick={resetToStart}>
+                Reset to starting position
+              </button>
+            </div>
             {fenError && <div className="error">{fenError}</div>}
             <label>
               Moves (SAN or UCI, space-separated)
@@ -560,6 +586,14 @@ export default function App() {
               />
             </label>
 
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={useAttention}
+                onChange={(event) => setUseAttention(event.target.checked)}
+              />
+              <span>Use neural-net attention (saliency) for this position</span>
+            </label>
             <button type="button" onClick={handleRun} disabled={loading}>
               {loading ? "Analyzing..." : "Run analysis"}
             </button>
