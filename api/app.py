@@ -214,3 +214,28 @@ def chat(request: ChatRequest) -> dict:
         "error": error,
         "hypothetical_lines": [line_to_dict(line) for line in hypothetical_lines],
     }
+
+
+class SaliencyRequest(BaseModel):
+    fen: Optional[str] = None
+    move: Optional[str] = None
+
+
+@app.post("/saliency")
+def saliency(request: SaliencyRequest) -> dict:
+    """Per-square attention saliency for the board heatmap overlay (neural bot).
+    Returns 0..1-normalised weight maps for the value head and the chosen move."""
+    try:
+        board = ct.build_board(request.fen, None)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    data = ct.attention_report_json(board)
+    if not data:
+        raise HTTPException(status_code=503, detail="attention model unavailable")
+    return {
+        "value": data.get("value"),
+        "chosen_move": data.get("chosen_move"),
+        "top_moves": data.get("top_moves", []),
+        "value_saliency": data.get("value_saliency_full", {}),
+        "move_saliency": data.get("move_saliency_full", {}),
+    }

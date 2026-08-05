@@ -107,7 +107,19 @@ def attention_report(
         "top_moves": top_moves,
         "value_saliency": _top_squares(value_sal, board, mirrored, topk),
         "move_saliency": _top_squares(move_sal, board, mirrored, topk),
+        # full 0..1-normalised per-square maps (real board coords) for a UI heatmap
+        "value_saliency_full": _full_map(value_sal, mirrored),
+        "move_saliency_full": _full_map(move_sal, mirrored),
     }
+
+
+def _full_map(weights: np.ndarray, mirrored: bool) -> Dict[str, float]:
+    mx = float(weights.max()) or 1.0
+    out: Dict[str, float] = {}
+    for canon_sq in range(64):
+        real = _canon_to_real(canon_sq, mirrored)
+        out[chess.square_name(real)] = round(float(weights[canon_sq]) / mx, 4)
+    return out
 
 
 def format_report_for_prompt(report: Dict) -> str:

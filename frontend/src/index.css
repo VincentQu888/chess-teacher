@@ -178,7 +178,33 @@ h1 {
   height: 88%;
   pointer-events: auto;
   cursor: grab;
+  position: relative;
+  z-index: 2;
   filter: drop-shadow(0 3px 4px rgba(32, 26, 22, 0.22));
+}
+
+.saliency-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.saliency-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 12px 0 4px;
+}
+
+.saliency-controls select {
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(11, 107, 95, 0.3);
+  background: #fff;
+  font-size: 0.85rem;
+  color: #333;
 }
 
 .piece-img:active {

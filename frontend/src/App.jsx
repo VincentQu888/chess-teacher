@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
 import wP from "./assets/pieces/wP.svg";
 import wN from "./assets/pieces/wN.svg";
@@ -115,9 +115,41 @@ export default function App() {
   const [arrowStart, setArrowStart] = useState(null);
   const [arrowPreview, setArrowPreview] = useState(null);
   const [highlights, setHighlights] = useState([]);
-  const [useAttention, setUseAttention] = useState(true);
+  const [showSaliency, setShowSaliency] = useState(false);
+  const [saliency, setSaliency] = useState(null);
+  const [saliencyMode, setSaliencyMode] = useState("value");
+  const [saliencyLoading, setSaliencyLoading] = useState(false);
 
   const board = useMemo(() => parseFen(gameFen), [gameFen]);
+
+  // Fetch neural-net attention saliency for the current position when the heatmap
+  // is toggled on (and refresh it whenever the position changes).
+  useEffect(() => {
+    if (!showSaliency) {
+      setSaliency(null);
+      return;
+    }
+    let cancelled = false;
+    setSaliencyLoading(true);
+    fetch("http://localhost:8001/saliency", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fen: gameRef.current.fen() }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!cancelled) setSaliency(data);
+      })
+      .catch(() => {
+        if (!cancelled) setSaliency(null);
+      })
+      .finally(() => {
+        if (!cancelled) setSaliencyLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showSaliency, gameFen, saliencyMode]);
 
   const syncFen = (nextFen) => {
     const trimmedFen = nextFen.trim();
@@ -332,7 +364,6 @@ export default function App() {
           fen: gameRef.current.fen(),
           moves: moveList.length ? moveList : null,
           prompt,
-          attention: useAttention,
         }),
       });
 
@@ -382,7 +413,6 @@ export default function App() {
           history: chatMessages,
           engine_lines: result.engine_lines || [],
           candidate_lines: result.candidate_lines || [],
-          attention: useAttention,
         }),
       });
 
@@ -492,6 +522,13 @@ export default function App() {
                   const isActive = square === activeSquare;
                   const isTarget = legalTargets.includes(square);
                   const isHighlighted = highlights.includes(square);
+                  const salMap =
+                    showSaliency && saliency
+                      ? saliencyMode === "value"
+                        ? saliency.value_saliency
+                        : saliency.move_saliency
+                      : null;
+                  const salWeight = salMap ? salMap[square] || 0 : 0;
                   const pieceSrc = piece ? PIECE_IMAGES[piece] : null;
                   const pieceObj = piece ? gameRef.current.get(square) : null;
                   const isDraggable =
@@ -512,6 +549,14 @@ export default function App() {
                       onMouseUp={(event) => handleArrowEnd(event, square)}
                       onMouseEnter={(event) => handleArrowHover(event, square)}
                     >
+                      {salWeight > 0.05 && (
+                        <div
+                          className="saliency-overlay"
+                          style={{
+                            backgroundColor: `rgba(226,59,46,${(0.72 * salWeight).toFixed(3)})`,
+                          }}
+                        />
+                      )}
                       {cIdx === 0 && (
                         <span className="coord coord-rank">{RANKS[rIdx]}</span>
                       )}
@@ -535,6 +580,32 @@ export default function App() {
                 })
               )}
             </div>
+          </div>
+
+          <div className="saliency-controls">
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={showSaliency}
+                onChange={(event) => setShowSaliency(event.target.checked)}
+              />
+              <span>
+                Show attention heatmap
+                {saliencyLoading ? " (loading…)" : ""}
+                {showSaliency && saliency && saliency.chosen_move
+                  ? ` — move ${saliency.chosen_move}`
+                  : ""}
+              </span>
+            </label>
+            {showSaliency && (
+              <select
+                value={saliencyMode}
+                onChange={(event) => setSaliencyMode(event.target.value)}
+              >
+                <option value="value">Value saliency (what drives the eval)</option>
+                <option value="move">Move saliency (what justifies the move)</option>
+              </select>
+            )}
           </div>
 
           <div className="form">
@@ -586,14 +657,6 @@ export default function App() {
               />
             </label>
 
-            <label className="toggle">
-              <input
-                type="checkbox"
-                checked={useAttention}
-                onChange={(event) => setUseAttention(event.target.checked)}
-              />
-              <span>Use neural-net attention (saliency) for this position</span>
-            </label>
             <button type="button" onClick={handleRun} disabled={loading}>
               {loading ? "Analyzing..." : "Run analysis"}
             </button>

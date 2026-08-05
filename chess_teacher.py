@@ -1519,9 +1519,10 @@ _AZ_SCRIPT = _AZ_DIR / "explain_position.py"
 _AZ_ENABLED = os.getenv("CHESS_TEACHER_ATTENTION", "1") != "0"
 
 
-def attention_model_block(board: chess.Board, timeout: float = 30.0) -> Optional[str]:
-    """Return the attention model's ground-truth block for ``board``, or None if
-    the bot/checkpoint is unavailable or the call fails (graceful degradation)."""
+def attention_report_json(board: chess.Board, timeout: float = 30.0) -> Optional[dict]:
+    """Run the alphazero explainer subprocess and return its full JSON report
+    (value, top moves, saliency lists, and per-square saliency maps), or None on
+    any failure (graceful degradation)."""
     if not _AZ_ENABLED or not _AZ_PYTHON.exists() or not _AZ_SCRIPT.exists():
         return None
     try:
@@ -1540,7 +1541,15 @@ def attention_model_block(board: chess.Board, timeout: float = 30.0) -> Optional
         data = json.loads(proc.stdout.strip().splitlines()[-1])
     except (json.JSONDecodeError, IndexError):
         return None
-    if "error" in data or "prompt_block" not in data:
+    if "error" in data:
+        return None
+    return data
+
+
+def attention_model_block(board: chess.Board, timeout: float = 30.0) -> Optional[str]:
+    """Return the attention model's ground-truth text block for ``board``, or None."""
+    data = attention_report_json(board, timeout=timeout)
+    if not data or "prompt_block" not in data:
         return None
     return data["prompt_block"]
 
