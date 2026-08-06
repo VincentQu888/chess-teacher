@@ -89,6 +89,9 @@ h1 {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
   gap: 28px;
+  /* Size each panel to its own content so the Results card stays compact
+     until a query populates it (instead of stretching to match the board). */
+  align-items: start;
 }
 
 .panel {
