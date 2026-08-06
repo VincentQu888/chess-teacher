@@ -550,7 +550,7 @@ export default function App() {
                   refY="2"
                   orient="auto"
                 >
-                  <polygon points="0 0, 4 2, 0 4" fill="#0b6b5f" />
+                  <polygon points="0 0, 4 2, 0 4" fill="#2b211b" />
                 </marker>
               </defs>
               {arrows.map((arrow) => {
@@ -563,7 +563,7 @@ export default function App() {
                     y1={start.y}
                     x2={end.x}
                     y2={end.y}
-                    stroke="#0b6b5f"
+                    stroke="#2b211b"
                     strokeWidth="1.6"
                     strokeLinecap="round"
                     markerEnd="url(#arrowhead)"
@@ -576,7 +576,7 @@ export default function App() {
                   y1={squareCenter(arrowPreview.from).y}
                   x2={squareCenter(arrowPreview.to).x}
                   y2={squareCenter(arrowPreview.to).y}
-                  stroke="#0b6b5f"
+                  stroke="#2b211b"
                   strokeWidth="1.2"
                   strokeLinecap="round"
                   strokeOpacity="0.45"

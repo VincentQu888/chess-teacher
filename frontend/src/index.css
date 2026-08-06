@@ -5,7 +5,7 @@
   --panel: #fff8ee;
   --ink: #201a16;
   --muted: #6b5b53;
-  --accent: #0b6b5f;
+  --accent: #2b211b;
   --accent-2: #f2a15f;
   --board-light: #f2e9d6;
   --board-dark: #c9a979;
@@ -212,7 +212,7 @@ h1 {
   position: absolute;
   inset: 10%;
   border-radius: 12px;
-  border: 2px solid rgba(11, 107, 95, 0.7);
+  border: 2px solid rgba(43, 33, 27, 0.7);
 }
 
 .square.target::after {
@@ -263,7 +263,7 @@ h1 {
 .saliency-controls select {
   padding: 6px 10px;
   border-radius: 8px;
-  border: 1px solid rgba(11, 107, 95, 0.3);
+  border: 1px solid rgba(43, 33, 27, 0.3);
   background: #fff;
   font-size: 0.85rem;
   color: #333;
@@ -284,8 +284,8 @@ h1 {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  border: 1px solid rgba(11, 107, 95, 0.55);
-  color: #0b6b5f;
+  border: 1px solid rgba(43, 33, 27, 0.55);
+  color: #2b211b;
   font-family: Georgia, "Times New Roman", serif;
   font-size: 11px;
   font-weight: 700;
@@ -296,7 +296,7 @@ h1 {
 .info-hint:hover .info-icon,
 .info-hint:focus .info-icon,
 .info-hint:focus-within .info-icon {
-  background: #0b6b5f;
+  background: #2b211b;
   color: #fff;
 }
 
@@ -311,7 +311,7 @@ h1 {
   border-radius: 10px;
   background: #ffffff;
   color: #333;
-  border: 1px solid rgba(11, 107, 95, 0.25);
+  border: 1px solid rgba(43, 33, 27, 0.25);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.16);
   font-size: 0.78rem;
   line-height: 1.45;
@@ -334,7 +334,7 @@ h1 {
 
 .info-tip strong {
   display: block;
-  color: #0b6b5f;
+  color: #2b211b;
   font-size: 0.78rem;
   margin: 9px 0 3px;
 }
@@ -420,7 +420,7 @@ button {
 button.ghost {
   background: transparent;
   color: var(--accent);
-  border: 1px solid rgba(11, 107, 95, 0.3);
+  border: 1px solid rgba(43, 33, 27, 0.3);
 }
 
 .button-row {
@@ -455,7 +455,7 @@ button:disabled {
 
 button:not(:disabled):hover {
   transform: translateY(-2px);
-  box-shadow: 0 8px 18px rgba(11, 107, 95, 0.2);
+  box-shadow: 0 8px 18px rgba(43, 33, 27, 0.2);
 }
 
 .error {
@@ -495,7 +495,7 @@ button:not(:disabled):hover {
 }
 
 .result-card .tag {
-  background: #0b6b5f;
+  background: #2b211b;
   color: white;
   padding: 2px 8px;
   border-radius: 999px;
