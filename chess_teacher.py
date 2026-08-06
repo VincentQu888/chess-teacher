@@ -1675,8 +1675,12 @@ def basic_explain(
 
 
 def _cp_of(score: Dict[str, int]) -> int:
-    if score.get("mate") is not None:
-        return 100000 if score["mate"] > 0 else -100000
+    m = score.get("mate")
+    if m is not None:
+        # Encode mate distance so a faster mate ranks strictly above a slower one
+        # (mate in 1 must NOT read as equal to mate in 15), while staying far above
+        # any centipawn evaluation.
+        return (100000 - m) if m > 0 else (-100000 - m)
     return score.get("cp", 0)
 
 
@@ -1856,13 +1860,22 @@ def practical_comparison(board: chess.Board, best_san: str, best_score: Dict[str
 
 
 def _near_equal_alt(engine_lines: List[LineResult], margin_cp: int = 60):
-    """Return the best alternative first-move line within margin of the top line."""
+    """Return the best alternative first-move line within margin of the top line.
+    Returns None when the top line is a forced mate: there is no 'practical choice'
+    to weigh once a mate is on the board, and a slower mate is not an equal option."""
     if not engine_lines or not engine_lines[0].moves:
         return None
-    best_cp = _cp_of(engine_lines[0].score)
-    top_move = engine_lines[0].moves[0]
+    best = engine_lines[0]
+    if best.score.get("mate") is not None:
+        return None
+    best_cp = _cp_of(best.score)
+    top_move = best.moves[0]
     for line in engine_lines[1:]:
-        if line.moves and line.moves[0] != top_move and best_cp - _cp_of(line.score) <= margin_cp:
+        if not line.moves or line.moves[0] == top_move:
+            continue
+        if line.score.get("mate") is not None:
+            continue
+        if best_cp - _cp_of(line.score) <= margin_cp:
             return line
     return None
 
@@ -1925,8 +1938,9 @@ def format_move_verdict(
             f"The engine puts this at {h_score} for {side}, versus {b_score} after the "
             f"best move {best.moves[0]}. Full line: {labeled}."
         )
-        # If the asked move is essentially as good, add the practical comparison.
-        if delta <= 60:
+        # If the asked move is essentially as good, add the practical comparison
+        # (never for mates -- a slower/other mate is not a 'practical' equal choice).
+        if delta <= 60 and best.score.get("mate") is None and move_line.score.get("mate") is None:
             pc = practical_comparison(board, best.moves[0], best.score, first, move_line.score)
             if pc:
                 parts.append(pc)
@@ -1988,6 +2002,22 @@ def _best_move_question(q: str) -> bool:
     return any(k in ql for k in keys)
 
 
+def _named_mate_for_move(board: chess.Board, mv: chess.Move) -> Optional[str]:
+    """If ``mv`` delivers a checkmate the concept engine recognises by name
+    (Anastasia's, Arabian, Boden's, smothered, back-rank, ...), return that name;
+    otherwise None. Verified from the board, so it's safe to state outright."""
+    if _concepts is None:
+        return None
+    try:
+        prefix = mv.uci() + " "
+        for c in _concepts.detect_checkmate_patterns(board):
+            if c.detail.startswith(prefix) and c.name and c.name != "Checkmate":
+                return c.name
+    except Exception:
+        return None
+    return None
+
+
 def describe_best_move(board: chess.Board, engine_lines: List[LineResult]) -> Optional[str]:
     """Deterministic, correct description of the engine's best move: mechanics are read
     from the board (capture / retreat-to-safety / develop / castle / check), never from
@@ -2039,15 +2069,18 @@ def describe_best_move(board: chess.Board, engine_lines: List[LineResult]) -> Op
         else:
             parts.append(f"It repositions the {pn} to {to_sq}.")
     if b.gives_check(mv):
-        parts.append("It comes with check.")
+        b_after = board.copy()
+        b_after.push(mv)
+        if b_after.is_checkmate():
+            named = _named_mate_for_move(board, mv)
+            parts.append(f"It's checkmate \u2014 {named}." if named else "It's checkmate.")
+        else:
+            parts.append("It comes with check.")
     if len(best.moves) > 1:
         parts.append(f"Main line: {format_moves_with_sides(board, best.moves[:4])}.")
-    # Offer a near-equal alternative with a practical note, when one exists.
-    alt = _near_equal_alt(engine_lines)
-    if alt is not None:
-        pc = practical_comparison(board, best.moves[0], best.score, alt.moves[0], alt.score)
-        if pc:
-            parts.append(pc)
+    # Note: no automatic practicality/near-equal-alternative commentary here \u2014 a
+    # 'best move' answer should stay focused. That comparison is reserved for explicit
+    # 'why not X' verdict questions (format_move_verdict).
     return " ".join(parts)
 
 

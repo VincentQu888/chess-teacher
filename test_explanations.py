@@ -14,7 +14,13 @@ import chess
 import re
 
 import verify_explanations as v
-from chess_teacher import defense_relations, practical_comparison
+from chess_teacher import (
+    LineResult,
+    _near_equal_alt,
+    defense_relations,
+    describe_best_move,
+    practical_comparison,
+)
 
 # The originally reported position: after Qxh8 the queen is on h8 with NO enemy
 # attackers and the move wins a rook. "Undefended" is irrelevant here.
@@ -75,6 +81,25 @@ def test_defense_relations_only_mentions_attacked_pieces():
         assert p is not None and b.attackers(not p.color, sq), f"unattacked piece listed: {r}"
 
 
+def test_best_move_names_mate_and_skips_practicality():
+    # Anastasia's mate in 1. The 'best move' answer must (a) name the mate using
+    # specific terminology and (b) NOT append practicality/near-equal chatter
+    # (a slower mate is never an 'essentially as good' alternative).
+    b = chess.Board("8/4N1pk/8/R7/8/8/8/6K1 w - - 0 1")
+    lines = [
+        LineResult("engine_1", ["Rh5#"], {"mate": 1}, [], "engine"),
+        LineResult("engine_2", ["Ra6"], {"mate": 15}, [], "engine"),
+    ]
+    text = describe_best_move(b, lines)
+    assert "checkmate" in text.lower()
+    assert "Anastasia's mate" in text
+    for noise in ("essentially as good", "more practical", "easier to play",
+                  "safe on", "follow up", "perfectly safe"):
+        assert noise not in text.lower(), text
+    # A forced mate offers no 'near-equal practical alternative'.
+    assert _near_equal_alt(lines) is None
+
+
 def test_concept_layer_faithful_on_sample_positions():
     for fen in [
         REPORTED_FEN,
@@ -90,5 +115,6 @@ if __name__ == "__main__":
     test_harness_flags_planted_verdict_violations()
     test_harness_flags_planted_concept_misclassification()
     test_defense_relations_only_mentions_attacked_pieces()
+    test_best_move_names_mate_and_skips_practicality()
     test_concept_layer_faithful_on_sample_positions()
     print("all explanation-faithfulness tests passed")
