@@ -83,6 +83,32 @@ function formatMoveLine(line) {
   return `${score}  ${moves}`.trim();
 }
 
+// Eval-bar helpers. Both evals are stored from White's perspective so a single
+// bottom-up fill represents White's share of the bar.
+function stockfishWhitePct(score) {
+  if (!score) return 50;
+  if (score.mate != null) return score.mate > 0 ? 100 : 0;
+  // Logistic squash of centipawns -> a smooth, lichess-like bar.
+  return 100 / (1 + Math.exp(-(score.cp || 0) / 350));
+}
+
+function alphazeroWhitePct(valueWhite) {
+  if (valueWhite == null) return 50;
+  return ((valueWhite + 1) / 2) * 100;
+}
+
+function formatSf(score) {
+  if (!score) return "\u2013";
+  if (score.mate != null) return (score.mate > 0 ? "M" : "-M") + Math.abs(score.mate);
+  const p = (score.cp || 0) / 100;
+  return (p >= 0 ? "+" : "") + p.toFixed(1);
+}
+
+function formatAz(valueWhite) {
+  if (valueWhite == null) return "\u2013";
+  return (valueWhite >= 0 ? "+" : "") + valueWhite.toFixed(2);
+}
+
 function squareCenter(square) {
   const fileIndex = FILES.indexOf(square[0]);
   const rankIndex = 8 - Number(square[1]);
@@ -98,8 +124,8 @@ export default function App() {
   const [fenInput, setFenInput] = useState(DEFAULT_FEN);
   const [fenError, setFenError] = useState("");
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
-  const [moves, setMoves] = useState("");
   const [result, setResult] = useState(null);
+  const [evalData, setEvalData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [chatMessages, setChatMessages] = useState([]);
@@ -148,6 +174,28 @@ export default function App() {
       cancelled = true;
     };
   }, [showSaliency, gameFen, saliencyMode]);
+
+  // Live dual eval bars (Stockfish + AlphaZero). Debounced so rapid moves don't
+  // spawn a request per intermediate position. Fails silently if the API is down.
+  useEffect(() => {
+    let cancelled = false;
+    const id = setTimeout(() => {
+      fetch("http://localhost:8001/eval", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fen: gameRef.current.fen() }),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (!cancelled && data) setEvalData(data);
+        })
+        .catch(() => {});
+    }, 200);
+    return () => {
+      cancelled = true;
+      clearTimeout(id);
+    };
+  }, [gameFen]);
 
   const syncFen = (nextFen) => {
     const trimmedFen = nextFen.trim();
@@ -317,7 +365,6 @@ export default function App() {
     setFenError("");
     setActiveSquare(null);
     setLegalTargets([]);
-    setMoves("");
     clearAnnotations();
   };
 
@@ -349,18 +396,13 @@ export default function App() {
       }
     }
 
-    const moveList = moves
-      .split(/\s+/)
-      .map((move) => move.trim())
-      .filter(Boolean);
-
     try {
       const response = await fetch("http://localhost:8001/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           fen: gameRef.current.fen(),
-          moves: moveList.length ? moveList : null,
+          moves: null,
           prompt,
         }),
       });
@@ -452,7 +494,12 @@ export default function App() {
           <div className="hero-prompt">{prompt || "Your prompt"}</div>
           <div className="hero-meta">
             <span>{gameFen ? "Custom FEN" : "Start position"}</span>
-            <span>{moves ? "With move list" : "No moves"}</span>
+            {evalData?.stockfish && (
+              <span>SF {formatSf(evalData.stockfish.score)}</span>
+            )}
+            {evalData?.alphazero && (
+              <span>AZ {formatAz(evalData.alphazero.value_white)}</span>
+            )}
           </div>
         </div>
       </header>
@@ -461,9 +508,34 @@ export default function App() {
         <section className="panel">
           <div className="panel-header">
             <h2>Position</h2>
-            <p>Paste a FEN and optional moves, then run analysis.</p>
+            <p>Paste a FEN or play on the board, then run analysis.</p>
           </div>
 
+          <div className="board-and-eval">
+          <div className="eval-bars">
+            <div
+              className="eval-bar"
+              title={`Stockfish (White POV): ${formatSf(evalData?.stockfish?.score)}`}
+            >
+              <div
+                className="eval-fill"
+                style={{ height: `${stockfishWhitePct(evalData?.stockfish?.score)}%` }}
+              />
+              <span className="eval-tag">SF</span>
+              <span className="eval-num">{formatSf(evalData?.stockfish?.score)}</span>
+            </div>
+            <div
+              className="eval-bar"
+              title={`AlphaZero value (White POV): ${formatAz(evalData?.alphazero?.value_white)}`}
+            >
+              <div
+                className="eval-fill"
+                style={{ height: `${alphazeroWhitePct(evalData?.alphazero?.value_white)}%` }}
+              />
+              <span className="eval-tag">AZ</span>
+              <span className="eval-num">{formatAz(evalData?.alphazero?.value_white)}</span>
+            </div>
+          </div>
           <div
             className="board-wrapper"
             onContextMenu={(event) => event.preventDefault()}
@@ -579,6 +651,7 @@ export default function App() {
               )}
             </div>
           </div>
+          </div>
 
           <div className="saliency-controls">
             <label className="toggle">
@@ -638,14 +711,6 @@ export default function App() {
               </button>
             </div>
             {fenError && <div className="error">{fenError}</div>}
-            <label>
-              Moves (SAN or UCI, space-separated)
-              <input
-                value={moves}
-                onChange={(event) => setMoves(event.target.value)}
-                placeholder="e4 e5 Nf3 Nc6"
-              />
-            </label>
             <label>
               Prompt
               <input

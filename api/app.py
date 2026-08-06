@@ -216,6 +216,55 @@ def chat(request: ChatRequest) -> dict:
     }
 
 
+class EvalRequest(BaseModel):
+    fen: Optional[str] = None
+    depth: int = 12
+    threads: int = 2
+
+
+@app.post("/eval")
+def eval_position(request: EvalRequest) -> dict:
+    """Lightweight dual evaluation for the eval bars: Stockfish (cp/mate) and the
+    AlphaZero net's value head. Both are returned from White's perspective so the
+    frontend can render each as a single bar. AlphaZero is best-effort (null if
+    the model is unavailable) so the endpoint still works without torch."""
+    try:
+        board = ct.build_board(request.fen, None)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    engine_path = ct.find_engine_path(None)
+    if not engine_path:
+        raise HTTPException(status_code=500, detail="Stockfish engine not found")
+
+    with ct.chess.engine.SimpleEngine.popen_uci(str(engine_path)) as engine:
+        engine.configure({"Threads": request.threads})
+        info = engine.analyse(board, ct.chess.engine.Limit(depth=request.depth))
+        white_score = ct.score_to_dict(info["score"].white())
+
+    stockfish = {"score": white_score, "formatted": ct.format_score(white_score)}
+
+    # AlphaZero value head: (-1, 1) from side-to-move; convert to White's POV.
+    alphazero = None
+    az_data = ct.attention_report_json(board)
+    if az_data is not None and az_data.get("value") is not None:
+        stm_value = float(az_data["value"])
+        white_value = stm_value if board.turn else -stm_value
+        alphazero = {
+            "value_white": white_value,
+            "value_stm": stm_value,
+            "checkpoint": az_data.get("checkpoint"),
+        }
+
+    return {
+        "fen": board.fen(),
+        "turn": "white" if board.turn else "black",
+        "game_over": board.is_game_over(),
+        "stockfish": stockfish,
+        "alphazero": alphazero,
+    }
+
+
 class SaliencyRequest(BaseModel):
     fen: Optional[str] = None
     move: Optional[str] = None

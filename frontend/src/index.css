@@ -120,9 +120,68 @@ h1 {
   z-index: 1;
 }
 
+.board-and-eval {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
 .board-wrapper {
   position: relative;
-  margin-bottom: 20px;
+  flex: 1;
+  min-width: 0;
+}
+
+.eval-bars {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+  align-items: stretch;
+}
+
+.eval-bar {
+  position: relative;
+  width: 22px;
+  height: 100%; /* stretch to the board's rendered height */
+  border-radius: 8px;
+  overflow: hidden;
+  background: #2b2b2b; /* Black's share */
+  border: 1px solid #d7c5a7;
+}
+
+.eval-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(180deg, #fdfdfd 0%, #e9e5dc 100%); /* White's share */
+  transition: height 0.25s ease;
+}
+
+.eval-tag {
+  position: absolute;
+  top: 3px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #9a9a9a;
+  z-index: 1;
+}
+
+.eval-num {
+  position: absolute;
+  bottom: 3px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 9px;
+  font-weight: 700;
+  color: #1c1c1c;
+  z-index: 1;
 }
 
 .arrow-layer {
