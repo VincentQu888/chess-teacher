@@ -668,6 +668,49 @@ export default function App() {
                   : ""}
               </span>
             </label>
+            <span
+              className="info-hint"
+              tabIndex={0}
+              role="note"
+              aria-label="What the attention heatmap, policy/value, and SF vs AZ mean"
+            >
+              <span className="info-icon">i</span>
+              <span className="info-tip" role="tooltip">
+                <strong>Attention heatmap</strong>
+                <p>
+                  Highlights the squares the neural net&rsquo;s self-attention
+                  weighted most while judging this position (idea from HEX-RL).
+                  Two views:
+                </p>
+                <ul>
+                  <li>
+                    <b>Value saliency</b> &mdash; squares that most drove the
+                    position <i>evaluation</i> (the value head).
+                  </li>
+                  <li>
+                    <b>Move saliency</b> &mdash; squares that most justified the
+                    net&rsquo;s <i>chosen move</i> (the policy head).
+                  </li>
+                </ul>
+                <strong>Policy vs value</strong>
+                <p>
+                  <b>Policy</b> is the net&rsquo;s move preference &mdash; a
+                  probability spread over legal moves (&ldquo;what to
+                  play&rdquo;). <b>Value</b> is one score for the whole position
+                  (&ldquo;who&rsquo;s winning&rdquo;, &minus;1&hellip;+1 from the
+                  side to move). Attention explains <i>both</i>: which squares fed
+                  each answer.
+                </p>
+                <strong>Stockfish (SF) vs AlphaZero (AZ)</strong>
+                <p>
+                  <b>SF</b> is the classical search engine &mdash; extremely
+                  strong, reports centipawns/mate. <b>AZ</b> is this project&rsquo;s
+                  trained attention network &mdash; it outputs policy + value and,
+                  unlike SF, can <i>explain itself</i> through this heatmap. The
+                  two eval bars let you compare their verdicts.
+                </p>
+              </span>
+            </span>
             {showSaliency && (
               <select
                 value={saliencyMode}

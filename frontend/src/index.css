@@ -266,6 +266,93 @@ h1 {
   color: #333;
 }
 
+.info-hint {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  cursor: help;
+  outline: none;
+}
+
+.info-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid rgba(11, 107, 95, 0.55);
+  color: #0b6b5f;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 11px;
+  font-weight: 700;
+  font-style: italic;
+  line-height: 1;
+}
+
+.info-hint:hover .info-icon,
+.info-hint:focus .info-icon,
+.info-hint:focus-within .info-icon {
+  background: #0b6b5f;
+  color: #fff;
+}
+
+.info-tip {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  width: 320px;
+  max-width: 78vw;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #333;
+  border: 1px solid rgba(11, 107, 95, 0.25);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.16);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  text-align: left;
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-4px);
+  transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s;
+  pointer-events: none;
+}
+
+.info-hint:hover .info-tip,
+.info-hint:focus .info-tip,
+.info-hint:focus-within .info-tip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.info-tip strong {
+  display: block;
+  color: #0b6b5f;
+  font-size: 0.78rem;
+  margin: 9px 0 3px;
+}
+
+.info-tip strong:first-child {
+  margin-top: 0;
+}
+
+.info-tip p {
+  margin: 0 0 4px;
+}
+
+.info-tip ul {
+  margin: 0 0 4px;
+  padding-left: 16px;
+}
+
+.info-tip li {
+  margin: 0 0 2px;
+}
+
 .piece-img:active {
   cursor: grabbing;
 }
