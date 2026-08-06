@@ -322,6 +322,22 @@ Combined with v5's near-flat low-vs-high response elsewhere, **search is saturat
 extra sims don't help because the value net is over-optimistic at tactical leaves
 (the same value-blindness ceiling). So ~2074–2147 is the peak from the search side too.
 
+### Iteration 10 (capacity lever): a materially larger network
+The objective invites "fix whatever architecture decisions you need", so the last
+untested lever — more network capacity — was tested properly (the earlier d320 hint
+was weak: old value target, 809k, no on-policy data). Trained a **d320 / 8-layer /
+WDL net (~8.7M params, ~1.8× v5's 4.85M)** from scratch on the full 944k corpus +
+on-policy self-play data, 16 epochs (matching v5's budget), attention trunk intact.
+  - Supervised: **val acc 0.408 ≈ v5's 0.407** — the bigger net fits the targets no
+    better than v5.
+  - vs SF@2000, **paired seed 4242 @ 3600 sims**: big net **0.671 (~2124, 35g,
+    CI [2011,2272])** vs v5 **0.700 (~2147)** — marginally *below*, i.e. **no gain**.
+**Conclusion:** capacity is confirmed *not* the bottleneck. Six training approaches
+(d320-old, 944k data, tanh(cp/500), expert iteration, WDL head, and a properly-
+trained 1.8× net) plus the search lever all converge on ~2074–2147. Deployed net
+stays v5. The binding limit is the value signal's tactical accuracy given laptop-
+scale, shallow-ish Stockfish labels — not net size, value parameterisation, or search.
+
 ### Bottom line on "highest Elo possible"
 - Highest **verified** Elo remains **v5 = ~2074** vs SF@2000 (100 games, 3600 sims,
   CI [2006,2148]); the self-play/expert-iteration pipeline **reaches and holds this
