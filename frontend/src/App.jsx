@@ -77,12 +77,6 @@ function pawnCountError(fen) {
   return "";
 }
 
-function formatMoveLine(line) {
-  const score = line.formatted_score || "?";
-  const moves = line.moves?.join(" ") || "";
-  return `${score}  ${moves}`.trim();
-}
-
 // Eval-bar helpers. Both evals are stored from White's perspective so a single
 // bottom-up fill represents White's share of the bar.
 function stockfishWhitePct(score) {
@@ -486,7 +480,7 @@ export default function App() {
           <h1>Explain the best move with engine-backed clarity.</h1>
           <p className="subhead">
             Feed a position, ask a question, and get a visual breakdown of engine
-            lines, candidate moves, and a concise explanation.
+            lines and a concise explanation.
           </p>
         </div>
         <div className="hero-card">
@@ -772,7 +766,7 @@ export default function App() {
         <section className="panel results">
           <div className="panel-header">
             <h2>Results</h2>
-            <p>Engine lines, candidate ideas, and the LLM explanation.</p>
+            <p>Engine lines and the LLM explanation.</p>
           </div>
 
           {!result && !loading && (
@@ -790,33 +784,6 @@ export default function App() {
                       <span>{line.moves.join(" ")}</span>
                     </li>
                   ))}
-                </ul>
-              </div>
-
-              <div className="result-card">
-                <h3>Candidate lines</h3>
-                <ul>
-                  {result.candidate_lines?.length ? (
-                    result.candidate_lines.map((line, idx) => (
-                      <li key={`candidate-${idx}`}>
-                        <div className="candidate-line">
-                          <strong>{line.label}</strong>
-                          <span>{formatMoveLine(line)}</span>
-                        </div>
-                        {line.tags?.length ? (
-                          <div className="tags">
-                            {line.tags.map((tag, tagIdx) => (
-                              <span className="chip" key={`${idx}-${tagIdx}`}>
-                                {tag.move}: {tag.tags.join(", ")}
-                              </span>
-                            ))}
-                          </div>
-                        ) : null}
-                      </li>
-                    ))
-                  ) : (
-                    <li className="muted">No candidate lines returned.</li>
-                  )}
                 </ul>
               </div>
 
