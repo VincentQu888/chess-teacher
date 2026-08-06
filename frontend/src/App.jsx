@@ -14,8 +14,6 @@ import bQ from "./assets/pieces/bQ.svg";
 import bK from "./assets/pieces/bK.svg";
 
 const DEFAULT_FEN =
-  "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 2 3";
-const START_FEN =
   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 const DEFAULT_PROMPT = "why cant I play Nf3 here";
 
