@@ -1688,11 +1688,24 @@ def _landing_features(board: chess.Board, san: str):
         moved is not None and moved.piece_type != chess.KING
         and static_exchange_eval(board, from_sq, not color) > 0
     )
+    is_capture = board.is_capture(mv)
+    captured_name = None
+    if is_capture:
+        if board.is_en_passant(mv):
+            captured_name = "pawn"
+        else:
+            cap_piece = board.piece_at(mv.to_square)
+            captured_name = chess.piece_name(cap_piece.piece_type) if cap_piece else None
     b.push(mv)
     to = mv.to_square
     piece = b.piece_at(to)
     if piece is None:
         return None
+    # Can the opponent actually attack the landing square? Being undefended only
+    # matters when the square is under (or can come under) enemy fire.
+    opp_attackers = [s for s in b.attackers(not color, to) if b.piece_at(s)]
+    attacked = len(opp_attackers) > 0
+    hangs = static_exchange_eval(b, to, not color) > 0
     defenders = [s for s in b.attackers(color, to) if b.piece_at(s)]
     defender_types = {b.piece_at(s).piece_type for s in defenders}
     defender_names = sorted({chess.piece_name(pt) for pt in defender_types})
@@ -1721,6 +1734,11 @@ def _landing_features(board: chess.Board, san: str):
         "solid_defense": solid_defense,
         "queen_only": queen_only,
         "loose": len(defenders) == 0,
+        "attacked": attacked,
+        "hangs": hangs,
+        "safe": not attacked,
+        "is_capture": is_capture,
+        "captured_name": captured_name,
         "central": 2 <= f <= 5 and 2 <= r <= 5,
         "shields_king": bool(set(b.attacks(to)) & king_ring),
         "develops": chess.square_rank(from_sq) in (0, 7)
@@ -1729,12 +1747,18 @@ def _landing_features(board: chess.Board, san: str):
     }
     # practicality score: solid defence and king shelter make a move easier/safer to play.
     score = 0.0
-    if feats["solid_defense"]:
-        score += 2
-    elif feats["queen_only"]:
-        score += 0.5
-    if feats["loose"]:
-        score -= 1
+    # Safety is only a factor when the opponent can actually attack the landing square.
+    # A piece that lands where nothing attacks it is perfectly safe whether or not it is
+    # defended, so "undefended" must NOT be treated as a downside in that case.
+    if attacked:
+        if hangs:
+            score -= 3            # the move leaves the piece en prise
+        elif feats["solid_defense"]:
+            score += 2            # attacked, but cheaply and solidly held
+        elif feats["queen_only"]:
+            score += 0.5          # held, but ties the queen to its defence
+        else:
+            score -= 1            # attacked and only loosely defended
     if feats["shields_king"]:
         score += 1
     if feats["develops"]:
@@ -1746,11 +1770,16 @@ def _landing_features(board: chess.Board, san: str):
 
 
 def _solidity_phrase(f) -> str:
+    # Undefended is only a talking point when the opponent can attack the square.
+    if not f["attacked"]:
+        return f"safe on {chess.square_name(f['to'])} (nothing attacks it)"
+    if f["hangs"]:
+        return f"left hanging on {chess.square_name(f['to'])}, where it can be captured"
     if f["solid_defense"]:
         return f"defended by {' and '.join('the ' + n for n in f['solid_defenders'])}"
     if f["queen_only"]:
         return "held only by the queen (which ties the queen to its defence)"
-    return f"left undefended on {chess.square_name(f['to'])}"
+    return f"attacked and only loosely defended on {chess.square_name(f['to'])}"
 
 
 def practical_comparison(board: chess.Board, best_san: str, best_score: Dict[str, int],
@@ -1796,9 +1825,24 @@ def practical_comparison(board: chess.Board, best_san: str, best_score: Dict[str
         + ", ".join(virtues) + "."
     )
 
-    downside = _solidity_phrase(other)
-    extra = " though it sits on a slightly more active square" if other["central"] and not prac["central"] else ""
-    parts.append(f"{other_san} is fine too, but there the {other['piece']} is {downside}{extra}.")
+    if other["safe"]:
+        # No real safety downside: the recommendation is only a mild practical lean,
+        # so don't invent an "undefended" drawback for a piece nothing can touch.
+        if other["is_capture"] and other["captured_name"]:
+            parts.append(
+                f"{other_san} is also strong \u2014 it wins the {other['captured_name']} and the "
+                f"{other['piece']} is safe on {chess.square_name(other['to'])}; {prac_san} is just "
+                f"a touch easier to follow up."
+            )
+        else:
+            parts.append(
+                f"{other_san} is also fine and perfectly safe; {prac_san} is just a touch easier "
+                f"to follow up."
+            )
+    else:
+        downside = _solidity_phrase(other)
+        extra = " though it sits on a slightly more active square" if other["central"] and not prac["central"] else ""
+        parts.append(f"{other_san} is fine too, but there the {other['piece']} is {downside}{extra}.")
     parts.append(f"With near-equal evaluations, {prac_san} is the easier move to play for a human.")
     return " ".join(parts)
 
