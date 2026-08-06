@@ -679,8 +679,7 @@ export default function App() {
                 <strong>Attention heatmap</strong>
                 <p>
                   Highlights the squares the neural net&rsquo;s self-attention
-                  weighted most while judging this position (idea from HEX-RL).
-                  Two views:
+                  weighted most while judging this position. Two views:
                 </p>
                 <ul>
                   <li>
