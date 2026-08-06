@@ -20,6 +20,7 @@ from chess_teacher import (
     _why_move_question,
     defense_relations,
     describe_best_move,
+    format_move_verdict,
     practical_comparison,
 )
 
@@ -111,6 +112,19 @@ def test_named_pattern_definition_is_available_to_model():
     assert "knight + rook" in block  # the correct definition, not a hallucination
 
 
+def test_verdict_names_the_pin_behind_a_losing_capture():
+    # The verdict must NAME the concept (pin), not just recite the line: Nxe5 loses
+    # because the f3 knight is pinned to the queen by Bg4.
+    b = chess.Board("rn1qkb1r/ppp2ppp/3pp3/4n3/2B1P1b1/2NP1N2/PPPB1PPP/R2QK2R w KQkq - 0 7")
+    losing = LineResult("hyp", ["Nxe5", "Bxd1", "Nxf7", "Kxf7", "Rxd1"],
+                        {"cp": -344}, [{"ply": 2, "tags": ["captures Q"]}], "hyp")
+    best = LineResult("engine_1", ["h3", "Bxf3", "Qxf3"], {"cp": -59}, [], "engine")
+    text = format_move_verdict(b, losing, [best])
+    low = text.lower()
+    assert "pinned" in low, text
+    assert "queen on d1" in low and "bishop on g4" in low, text
+
+
 def test_why_cant_i_play_is_a_verdict_not_a_why_good_question():
     # 'why can't I play X' asks why a move is BAD; it must NOT be routed to the
     # 'why is this move good' explainer (which rationalized a queen-hanging capture
@@ -141,5 +155,6 @@ if __name__ == "__main__":
     test_best_move_names_mate_and_skips_practicality()
     test_named_pattern_definition_is_available_to_model()
     test_why_cant_i_play_is_a_verdict_not_a_why_good_question()
+    test_verdict_names_the_pin_behind_a_losing_capture()
     test_concept_layer_faithful_on_sample_positions()
     print("all explanation-faithfulness tests passed")

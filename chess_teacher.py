@@ -1880,6 +1880,31 @@ def _near_equal_alt(engine_lines: List[LineResult], margin_cp: int = 60):
     return None
 
 
+def _pin_on_square(board: chess.Board, square: int) -> Optional[str]:
+    """If the piece on ``square`` is pinned (absolute to the king, or relative to a more
+    valuable piece), return a natural phrase naming the pinned piece, what it is pinned
+    to, and the pinner — using the verified concept detector. None if not pinned."""
+    if _concepts is None:
+        return None
+    name = chess.square_name(square)
+
+    def pn(sq_name: str) -> str:
+        p = board.piece_at(chess.parse_square(sq_name))
+        return chess.piece_name(p.piece_type) if p else "piece"
+
+    try:
+        for c in _concepts.detect_pins(board):
+            if c.name == "Pin (relative)" and len(c.squares) == 3 and c.squares[1] == name:
+                slider, pinned, behind = c.squares
+                return (f"the {pn(pinned)} on {pinned} is pinned to the more valuable "
+                        f"{pn(behind)} on {behind} by the {pn(slider)} on {slider}")
+            if c.name == "Pin (absolute)" and c.squares and c.squares[0] == name:
+                return f"the {pn(name)} on {name} is pinned to the king"
+    except Exception:
+        return None
+    return None
+
+
 def format_move_verdict(
     board: chess.Board,
     move_line: LineResult,
@@ -1927,11 +1952,24 @@ def format_move_verdict(
         else:
             verdict = "is about as good as the top move"
         parts.append(f"{first} {verdict}.")
+        # Name the concept behind the refutation: if the moved piece was pinned,
+        # moving it is what drops material (don't just recite the line).
+        pin_reason = None
+        try:
+            pin_reason = _pin_on_square(board, parse_move(board, first).from_square)
+        except Exception:
+            pin_reason = None
         if reply and cap_tag and delta >= 50:
-            parts.append(
-                f"The point: after {first}, {opp} plays {reply} ({cap_tag}), so {side} "
-                f"comes out worse."
-            )
+            if pin_reason:
+                parts.append(
+                    f"{first} moves a pinned piece — {pin_reason} — so after {first}, "
+                    f"{opp} plays {reply} ({cap_tag}) and {side} comes out worse."
+                )
+            else:
+                parts.append(
+                    f"The point: after {first}, {opp} plays {reply} ({cap_tag}), so {side} "
+                    f"comes out worse."
+                )
         elif reply and cap_tag:
             parts.append(f"After {first}, {opp} replies {reply} ({cap_tag}).")
         parts.append(
