@@ -2594,9 +2594,39 @@ def concept_names_present(board: chess.Board, moves: Optional[List[str]] = None)
     return {c.name for c in detect_all_concepts(board, moves)}
 
 
+def _load_concept_descriptions() -> Dict[str, str]:
+    """Parse the one-line glossary from CHESS_CONCEPTS.md into {name: definition} so the
+    LLM can *explain* a detected pattern accurately (not invent a definition). Best
+    effort: returns whatever parses, or {} if the doc is unavailable."""
+    import os
+    import re
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CHESS_CONCEPTS.md")
+    out: Dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                # e.g.  "- **Anastasia's mate** \u2b1c \u2014 knight + rook mate on the h-file (or edge)."
+                m = re.match(r"\s*-\s+\*\*(.+?)\*\*.*?\u2014\s*(.+?)\s*$", line)
+                if m:
+                    out[m.group(1).strip()] = m.group(2).strip()
+    except Exception:
+        return out
+    return out
+
+
+CONCEPT_DESCRIPTIONS: Dict[str, str] = _load_concept_descriptions()
+
+
+def concept_description(name: str) -> Optional[str]:
+    """Authoritative one-line definition for a concept/pattern name, or None."""
+    return CONCEPT_DESCRIPTIONS.get(name)
+
+
 def format_concepts_for_prompt(board: chess.Board, moves: Optional[List[str]] = None,
                                max_items: int = 40) -> str:
-    """Group detected concepts by category into a compact ground-truth block."""
+    """Group detected concepts by category into a compact ground-truth block. Each
+    distinct pattern is annotated once with its glossary definition (after '\u2014') so the
+    model can explain what the pattern *is*, not just that it occurred."""
     concepts = detect_all_concepts(board, moves)
     if not concepts:
         return "Chess concepts detected: (none notable)"
@@ -2612,15 +2642,22 @@ def format_concepts_for_prompt(board: chess.Board, moves: Optional[List[str]] = 
     by_cat: Dict[str, List[Concept]] = {}
     for c in concepts[:max_items * 2]:
         by_cat.setdefault(c.category, []).append(c)
-    lines = ["Chess concepts detected (deterministic — cite freely):"]
+    lines = ["Chess concepts detected (deterministic — cite freely; text after an "
+             "em-dash is the definition of that pattern, safe to use when explaining it):"]
     count = 0
+    described: set = set()
     for cat in order:
         items = by_cat.get(cat, [])
         if not items:
             continue
         lines.append(f"- {titles.get(cat, cat)}:")
         for c in items:
-            lines.append(f"    - {c.line()}")
+            text = c.line()
+            desc = CONCEPT_DESCRIPTIONS.get(c.name)
+            if desc and c.name not in described:
+                text = f"{text} — {desc}"
+                described.add(c.name)
+            lines.append(f"    - {text}")
             count += 1
             if count >= max_items:
                 break

@@ -100,6 +100,16 @@ def test_best_move_names_mate_and_skips_practicality():
     assert _near_equal_alt(lines) is None
 
 
+def test_named_pattern_definition_is_available_to_model():
+    # The bot must be able to *define* a detected pattern, not invent one: the
+    # glossary from CHESS_CONCEPTS.md is attached to the concept block.
+    import chess_concepts as cc
+    assert cc.concept_description("Anastasia's mate"), "glossary not loaded"
+    block = cc.format_concepts_for_prompt(chess.Board("8/4N1pk/8/R7/8/8/8/6K1 w - - 0 1"))
+    assert "Anastasia's mate" in block
+    assert "knight + rook" in block  # the correct definition, not a hallucination
+
+
 def test_concept_layer_faithful_on_sample_positions():
     for fen in [
         REPORTED_FEN,
@@ -116,5 +126,6 @@ if __name__ == "__main__":
     test_harness_flags_planted_concept_misclassification()
     test_defense_relations_only_mentions_attacked_pieces()
     test_best_move_names_mate_and_skips_practicality()
+    test_named_pattern_definition_is_available_to_model()
     test_concept_layer_faithful_on_sample_positions()
     print("all explanation-faithfulness tests passed")
