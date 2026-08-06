@@ -17,6 +17,7 @@ import verify_explanations as v
 from chess_teacher import (
     LineResult,
     _near_equal_alt,
+    _why_move_question,
     defense_relations,
     describe_best_move,
     practical_comparison,
@@ -110,6 +111,18 @@ def test_named_pattern_definition_is_available_to_model():
     assert "knight + rook" in block  # the correct definition, not a hallucination
 
 
+def test_why_cant_i_play_is_a_verdict_not_a_why_good_question():
+    # 'why can't I play X' asks why a move is BAD; it must NOT be routed to the
+    # 'why is this move good' explainer (which rationalized a queen-hanging capture
+    # as 'an even trade'). It should fall through to the engine-grounded verdict.
+    b = chess.Board("rn1qkb1r/ppp2ppp/3pp3/4n3/2B1P1b1/2NP1N2/PPPB1PPP/R2QK2R w KQkq - 0 7")
+    for q in ("why cant i play nxe5 here?", "why can't i play Nxe5?",
+              "is Nxe5 bad?", "doesn't Nxe5 lose the queen?"):
+        assert _why_move_question(b, q) is False, q
+    # A genuine 'why is this good' question still routes to the positive explainer.
+    assert _why_move_question(b, "why is this trade good?") is True
+
+
 def test_concept_layer_faithful_on_sample_positions():
     for fen in [
         REPORTED_FEN,
@@ -127,5 +140,6 @@ if __name__ == "__main__":
     test_defense_relations_only_mentions_attacked_pieces()
     test_best_move_names_mate_and_skips_practicality()
     test_named_pattern_definition_is_available_to_model()
+    test_why_cant_i_play_is_a_verdict_not_a_why_good_question()
     test_concept_layer_faithful_on_sample_positions()
     print("all explanation-faithfulness tests passed")

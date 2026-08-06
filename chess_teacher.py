@@ -2090,7 +2090,11 @@ def _why_move_question(board: chess.Board, q: str) -> bool:
     ql = q.lower()
     if "why not" in ql:
         return False
-    if any(w in ql for w in (" bad", " worse", "blunder", "mistake", "instead of")):
+    # 'why can't I play X', 'can I play X', 'is X bad/losing' etc. are VERDICT
+    # questions about a (usually non-best) move -- never assume the move is good.
+    if any(w in ql for w in (" bad", " worse", "blunder", "mistake", "instead of",
+                             "can't", "cant", "cannot", "can i", "unable", "illegal",
+                             "lose", "loses", "losing", "hang", "drop")):
         return False
     has_why = ("why" in ql or "idea" in ql or "purpose" in ql or "point of" in ql
                or "reason" in ql)
@@ -2226,8 +2230,12 @@ def llm_explain(
     # 'Why is this move good / why trade / what's the idea' -> deterministic why-answer.
     if _why_move_question(board, prompt):
         pm = find_prompt_moves(prompt, board)
-        mv_san = pm[0] if pm else (engine_lines[0].moves[0] if engine_lines and engine_lines[0].moves else None)
-        if mv_san:
+        best_san = engine_lines[0].moves[0] if engine_lines and engine_lines[0].moves else None
+        mv_san = pm[0] if pm else best_san
+        # Only give a positive 'why it's good' when the named move really is the best
+        # move. For any other named move, fall through to the engine-grounded verdict
+        # so we never rationalize a blunder (e.g. capturing with a pinned piece).
+        if mv_san and (not pm or mv_san == best_san):
             why = describe_why_move(board, mv_san, engine_lines)
             if why:
                 return why
@@ -2376,8 +2384,12 @@ def llm_followup(
     # 'Why is this move good / why trade / what's the idea' -> deterministic why-answer.
     if _why_move_question(board, question):
         pm = find_prompt_moves(question, board)
-        mv_san = pm[0] if pm else (engine_lines[0].moves[0] if engine_lines and engine_lines[0].moves else None)
-        if mv_san:
+        best_san = engine_lines[0].moves[0] if engine_lines and engine_lines[0].moves else None
+        mv_san = pm[0] if pm else best_san
+        # Only give a positive 'why it's good' when the named move really is the best
+        # move. For any other named move, fall through to the engine-grounded verdict
+        # so we never rationalize a blunder (e.g. capturing with a pinned piece).
+        if mv_san and (not pm or mv_san == best_san):
             why = describe_why_move(board, mv_san, engine_lines)
             if why:
                 return why
