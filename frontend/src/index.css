@@ -254,7 +254,7 @@ h1 {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
-  margin: 12px 0 4px;
+  margin: 12px 0 18px;
 }
 
 .saliency-controls select {

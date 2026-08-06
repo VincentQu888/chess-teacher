@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import chess
 
+import re
+
 import verify_explanations as v
-from chess_teacher import practical_comparison
+from chess_teacher import defense_relations, practical_comparison
 
 # The originally reported position: after Qxh8 the queen is on h8 with NO enemy
 # attackers and the move wins a rook. "Undefended" is irrelevant here.
@@ -56,6 +58,23 @@ def test_harness_flags_planted_concept_misclassification():
     assert reasons == ["c4", "e3"]
 
 
+def test_defense_relations_only_mentions_attacked_pieces():
+    # A quietly-defended-but-unattacked pawn (g7, guarded by the king) is noise
+    # and must not be reported; but a defender of an ATTACKED piece is fine.
+    b = chess.Board("r2q1rk1/pbpn2pp/1p1ppn2/5pB1/1PPP4/2QBPN2/P4PPP/R4RK1 b - - 0 11")
+    rels = defense_relations(b)
+    assert not any("on g7 is defended" in r for r in rels), rels
+    # g7 may still appear where relevant: as a defender of the attacked f6 knight.
+    assert any("knight on f6 is defended" in r and "Pg7" in r for r in rels), rels
+    # Invariant: every piece whose defenders are listed is actually attacked.
+    for r in rels:
+        m = re.search(r" on ([a-h][1-8]) is defended by", r)
+        assert m, r
+        sq = chess.parse_square(m.group(1))
+        p = b.piece_at(sq)
+        assert p is not None and b.attackers(not p.color, sq), f"unattacked piece listed: {r}"
+
+
 def test_concept_layer_faithful_on_sample_positions():
     for fen in [
         REPORTED_FEN,
@@ -70,5 +89,6 @@ if __name__ == "__main__":
     test_reported_position_no_bogus_undefended_downside()
     test_harness_flags_planted_verdict_violations()
     test_harness_flags_planted_concept_misclassification()
+    test_defense_relations_only_mentions_attacked_pieces()
     test_concept_layer_faithful_on_sample_positions()
     print("all explanation-faithfulness tests passed")

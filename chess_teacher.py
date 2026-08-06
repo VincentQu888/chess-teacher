@@ -669,12 +669,18 @@ def attack_relations(board: chess.Board) -> List[str]:
 
 
 def defense_relations(board: chess.Board) -> List[str]:
-    """For each piece, list which friendly pieces defend it. Mirror of attack_relations —
-    together they form the complete attacker/defender graph for the position."""
+    """For each piece that is CURRENTLY ATTACKED by an enemy piece, list which
+    friendly pieces defend it. Defense only matters when there is an attack to meet,
+    so quietly-defended-but-unattacked pieces (e.g. a pawn the king happens to stand
+    next to, like g7) are omitted as noise. Together with attack_relations this forms
+    the *contested* attacker/defender graph the position actually turns on."""
     rels: List[str] = []
     for sq in chess.SQUARES:
         p = board.piece_at(sq)
         if not p:
+            continue
+        # Skip pieces no enemy attacks -- their defenders are irrelevant to the position.
+        if not board.attackers(not p.color, sq):
             continue
         defenders = []
         for d in board.attackers(p.color, sq):
