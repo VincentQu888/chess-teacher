@@ -31,3 +31,8 @@ __pycache__/
 /alphazero/wdl_base_subset/
 /alphazero/search_sweep.sh
 /alphazero/sweep.out
+/alphazero/checkpoints_big/
+/alphazero/big_run.out
+/alphazero/run_big.sh
+/alphazero/search_sweep.sh
+/alphazero/sweep.out
