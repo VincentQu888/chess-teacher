@@ -16,3 +16,18 @@ __pycache__/
 /alphazero/.venv
 /alphazero/refs/
 /alphazero/saliency_*.png
+
+# alphazero self-play / expert-iteration working dirs + generated data
+/alphazero/ei/
+/alphazero/selfplay_data/
+/alphazero/checkpoints_sp*/
+/alphazero/_smoke*/
+/alphazero/_bench*/
+/alphazero/ei_run.out
+/alphazero/ei_base_subset/
+/alphazero/checkpoints_wdl*/
+/alphazero/wdl_run.out
+/alphazero/wdl2_run.out
+/alphazero/wdl_base_subset/
+/alphazero/search_sweep.sh
+/alphazero/sweep.out

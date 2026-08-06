@@ -183,3 +183,155 @@ c_puct/fpu tune at bs<=8 (preserve search quality), more epochs, or a larger mod
 `elo(bot) ≈ 2000 - 400·log10(1/score - 1)` from an alternating-colour match vs
 Stockfish `UCI_LimitStrength=true, UCI_Elo=2000`. Target: estimated Elo ≥ 2000
 (ideally lower CI bound ≥ 2000 over a sufficient number of games).
+
+---
+
+## Iteration 6: Self-play RL (expert iteration) — push Elo past the distillation ceiling
+
+### Why (diagnosis recap)
+Supervised distillation asymptotes at (and below) its shallow-Stockfish teacher,
+and `diag.py` pinned the ceiling on **tactical value blindness** (over-optimistic
+value net, ~8.8% blunder rate) — *not* capacity or search. Better supervised
+metrics (v3) did not raise Elo. The way past a teacher is **AlphaZero self-play**:
+train on the **MCTS visit distribution** (an improved policy the net can chase)
+and the **actual game outcome** as the value target (inherently non-saturating
+and tactically grounded — the direct fix for value blindness).
+
+### Architecture decisions (attention kept for the explainer)
+- **Value target** switched from `tanh(cp)` (saturating, over-optimistic) to the
+  **self-play game outcome z ∈ {−1,0,+1}** from the mover's perspective, with an
+  optional blend with the MCTS root value (`--value-lambda`).
+- **Policy target** switched from Stockfish MultiPV to the **MCTS root visit
+  distribution** (policy improvement → lets the net exceed the teacher).
+- **Attention network is unchanged** (`model.py`): same tokens/heads/params, so
+  its attention-weighted board state still drives the chess-teacher explainer.
+  Only the *training targets* changed.
+- **Warm-start from the distilled net (v5)** instead of learning from scratch
+  (infeasible on a laptop) — this is expert iteration / fine-tuning upward.
+- Self-play uses **Dirichlet root noise** + a **temperature schedule** (temp=1 for
+  the first `--temp-moves` plies, then greedy) + **resign** (with a no-resign
+  fraction), and reuses the per-game FEN eval cache for throughput.
+
+### New components
+| File | Role |
+|---|---|
+| `selfplay.py` | Generate self-play games (multiprocess, CPU workers); writes shards with MCTS-visit policy targets + outcome value `z` + root `q_value`. |
+| `train_selfplay.py` | Train on self-play targets, warm-started from a checkpoint; optional retained distillation data (`--retain-dir/--retain-frac`) to avoid catastrophic forgetting. |
+| `head_to_head.py` | Candidate-vs-incumbent match (prints `A_SCORE=`) for promotion gating. |
+| `expert_iteration.py` | Orchestrator: self-play → train → gated promotion → periodic Stockfish eval, over a rolling replay buffer (`--window` iterations). Resumable via `<workdir>/state.json`. |
+
+### Workflow
+```
+# one command runs the whole loop (self-play RL), warm-starting from v5:
+python expert_iteration.py --workdir ei --warm-start checkpoints_v5/best.pt \
+    --iterations 8 --games 140 --sp-sims 160 --workers 10 \
+    --epochs 3 --window 4 --retain-dir data_v5 --retain-frac 0.4 \
+    --gate-games 30 --gate-sims 120 --gate-threshold 0.52 \
+    --sf-every 2 --sf-games 24 --sf-sims 1600
+# resumes automatically if re-run (reads ei/state.json).
+```
+The explainer (`explain_position.py::default_ckpt`) now prefers `ei/best.pt` when
+present, so chess-teacher's saliency comes from the strongest (self-play) net
+while keeping the identical attention architecture.
+
+### Perf (M3 Pro)
+- Self-play ~12 pos/s/worker at 160 sims (batch 4–8, CPU); ~10–12 min per
+  140-game iteration with 10 workers. Training a few epochs on the buffer is
+  ~seconds–minutes on MPS. Phases run sequentially (no CPU/GPU contention).
+
+### Status
+- [x] Self-play generator, self-play trainer, gating match, and orchestrator
+      implemented and smoke-tested end-to-end.
+- [x] First real *pure-AlphaZero* self-play run (iters 1–2) — **REGRESSED**: at a
+      matched config (1600 sims, 24 games, seed 2) v5 scores 0.646 (~2104 Elo)
+      but the iter-2 self-play net scored 0.104 (~1626). Root causes: (a) the
+      bot-vs-bot gate at 120 sims is blind to real strength (it "won" 2W-28D-0L
+      yet collapsed vs Stockfish), and (b) pure game-outcome value targets on a
+      tiny sample overwrote v5's tuned value head (train acc fell 0.41→0.16).
+- [x] `verify_selfplay.py` added for the definitive head-to-head + SF comparison.
+
+### Iteration 7 (corrected): expert iteration = self-play data + Stockfish labels + SF gate
+The pure-self-play regression showed two things must change on laptop compute:
+the **target quality** and the **promotion gate**. Corrected design:
+- **Generation stays self-play / on-policy**: the net plays itself with MCTS
+  (`selfplay.py --label-stockfish`), so we train on the distribution the bot
+  actually reaches.
+- **Targets come from Stockfish** (soft MultiPV policy + cp value) on each visited
+  position — DAgger / expert iteration. Written in the *same shard schema* as the
+  distillation corpus, so `train.py` consumes `data_v5 + on-policy` warm-started
+  from the current best. This *preserves* the value head (verified: warm-start
+  training keeps val acc ~0.41 / value ~0.03, unlike the pure-SP collapse).
+- **Promotion is gated vs Stockfish@2000** at realistic sims (`evaluate.py`,
+  paired seed). A candidate is promoted only if it scores ≥ the incumbent's
+  Stockfish score (v5 is the permanent floor) → the shipped net can **never**
+  regress below v5, and only genuine gains are kept.
+- On-policy data is oversampled (`--onpolicy-oversample`) against a base-corpus
+  subset so it carries real weight while epochs stay fast.
+- New/updated files: `selfplay.py` (`--label-stockfish/--sf-depth/--sf-multipv`,
+  on-policy SF-labelled generation), `train.py` (comma-separated `--data-dir`,
+  `--warm-start`), `expert_iteration.py` (rewritten: gen → warm-start retrain →
+  SF gate → monotonic promotion), `verify_selfplay.py`.
+- Run: `python expert_iteration.py --workdir ei --base-data ei_base_subset
+  --games 160 --sims 100 --sf-depth 12 --epochs 3 --gate-games 40 --gate-sims 800`.
+
+- [x] Corrected expert-iteration run executed (`ei/`, floor = v5 @ gate 40g/800sims
+      = score 0.588 ~2061 Elo). Results (gate = 40 games vs SF@2000, 800 sims, paired seed):
+
+  | iter | on-policy data | train val-acc | candidate vs SF@2000 | promoted? |
+  |---|---|---|---|---|
+  | floor (v5) | — | 0.407 | 0.588 (~2061) | — |
+  | 1 (depth-16 labels) | ~16k | 0.417 | 0.588 (~2061) | no (= floor) |
+  | 2 (depth-14, more data) | ~40k, val win×4 | 0.434 | 0.550 (~2035) | no (< floor) |
+
+  **Finding:** the corrected loop is *safe* — it never regressed (contrast the naive
+  self-play collapse to ~1626) and correctly kept v5 both times. But it did **not
+  exceed** v5: supervised metrics improved (val-acc 0.407→0.434) yet Stockfish Elo
+  stayed ~2035–2061 (within 40-game noise). This reproduces the project's core
+  ceiling — **tactical value blindness**: better policy/value *fit* does not raise
+  match Elo, because the value net stays over-optimistic at tactical leaves. On this
+  laptop (5M-param net, no datacenter self-play), ~2074–2104 (v5) is the ceiling.
+
+### Iteration 8 (architecture): WDL value head (attack value blindness at the root)
+The diagnosed ceiling is *tactical value blindness* (over-optimistic scalar value).
+The principled architecture fix (Lc0-style) is a **win/draw/loss value head** trained
+with cross-entropy instead of the saturating `tanh(cp)` MSE. Implemented behind a
+`ModelConfig.wdl` flag: `model.py` value head -> 3 logits, `forward` still returns a
+scalar `value = P(win) - P(loss)` so MCTS / evaluate / the explainer need **no**
+changes (attention trunk untouched -> saliency intact, verified). `train.py` gained
+`--wdl` (cp->soft-WDL targets + CE loss) and warm-starts the trunk/policy from v5,
+reinitialising only the value head.
+
+Results vs SF@2000 (gate 40g/800sims, seed 777; v5 floor = 0.588 ~2061):
+  - WDL, 6 ep on 200k: **0.388 (~1920)** — under-trained fresh head.
+  - WDL, 10 ep on ~380k (base subset + on-policy ×2): **~0.55 (~2035)** — recovered to
+    ~v5 level, policy acc held (0.42), value CE plateaued ~0.51, but did **not exceed**
+    the floor. Not promoted; v5 remains deployed (`ei/best.pt` is byte-identical to v5).
+
+**Conclusion:** five independent approaches now land at or below v5 — bigger net
+(d320), more data (944k), less-saturating value (tanh(cp/500)), on-policy expert
+iteration, and a WDL head. The ~2074–2104 result is a **capacity/compute ceiling**
+(5M-param net, laptop MPS), not a target/parameterisation bug. Breaking it needs a
+larger network + real (datacenter-scale) self-play, which this hardware cannot do.
+
+### Iteration 9 (search lever): does more play-time search beat 3600 sims?
+The last untested lever for higher Elo is play-time search. Paired match vs SF@2000
+(same seed/openings, 30 games):
+  - v5 @ 3600 sims / batch 4 (deployed): **0.700 -> ~2147** (CI [2025,2321]).
+  - v5 @ 6400 sims / batch 2 (more search): ~2058 through 12 paired games — **no gain**.
+Combined with v5's near-flat low-vs-high response elsewhere, **search is saturated**:
+extra sims don't help because the value net is over-optimistic at tactical leaves
+(the same value-blindness ceiling). So ~2074–2147 is the peak from the search side too.
+
+### Bottom line on "highest Elo possible"
+- Highest **verified** Elo remains **v5 = ~2074** vs SF@2000 (100 games, 3600 sims,
+  CI [2006,2148]); the self-play/expert-iteration pipeline **reaches and holds this
+  and provably cannot ship anything weaker** (Stockfish-gated promotion, v5 floor).
+- Self-play was implemented two ways (pure AlphaZero visit/outcome; and the robust
+  expert-iteration with Stockfish labels) and the attention architecture is intact,
+  so chess-teacher saliency is unchanged. `explain_position.default_ckpt` prefers
+  `ei/best.pt` (≥ v5).
+- Materially exceeding v5 needs a bigger net + real (datacenter-scale) self-play or
+  a fundamentally better value signal — not achievable on this hardware. The pipeline
+  is in place to capture any gain automatically if more compute is applied.
+- [ ] (compute-bound / optional) larger self-play budget or a higher-sim play config
+      to squeeze marginal Elo; confirm any new best via `verify_selfplay.py`.

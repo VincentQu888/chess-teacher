@@ -43,6 +43,7 @@ class ModelConfig:
     n_layers: int = 6
     d_ff: int = 1024
     dropout: float = 0.1
+    wdl: bool = False  # if True, value head predicts win/draw/loss (3 logits)
 
 
 class SelfAttention(nn.Module):
@@ -119,10 +120,18 @@ class AttentionChessNet(nn.Module):
 
         # policy: per square token -> 73 planes -> flatten to 4672
         self.policy_head = nn.Linear(d, 73)
-        # value: CLS token -> scalar in (-1, 1)
-        self.value_head = nn.Sequential(
-            nn.Linear(d, d), nn.GELU(), nn.Linear(d, 1)
-        )
+        # value: CLS token -> scalar in (-1, 1), OR win/draw/loss logits (WDL head).
+        # WDL (Lc0-style) gives a better-calibrated, non-saturating value signal that
+        # directly targets the diagnosed 'value blindness' (over-optimistic evals).
+        self.wdl = bool(self.cfg.wdl)
+        if self.wdl:
+            self.value_head = nn.Sequential(
+                nn.Linear(d, d), nn.GELU(), nn.Linear(d, 3)
+            )
+        else:
+            self.value_head = nn.Sequential(
+                nn.Linear(d, d), nn.GELU(), nn.Linear(d, 1)
+            )
 
         self.register_buffer("_sq_idx", torch.arange(NUM_SQUARES), persistent=False)
         self.apply(self._init)
@@ -149,6 +158,7 @@ class AttentionChessNet(nn.Module):
         piece_ids: torch.Tensor,
         globals_: torch.Tensor,
         return_attn: bool = False,
+        return_wdl: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[List[torch.Tensor]]]:
         x = self._embed(piece_ids, globals_)
         attns: List[torch.Tensor] = []
@@ -161,7 +171,16 @@ class AttentionChessNet(nn.Module):
         sq_tokens = x[:, :NUM_SQUARES, :]              # (B,64,d)
         policy = self.policy_head(sq_tokens)           # (B,64,73)
         policy = policy.reshape(x.shape[0], POLICY_SIZE)  # index = sq*73 + plane
-        value = torch.tanh(self.value_head(x[:, CLS_TOKEN, :])).squeeze(-1)  # (B,)
+        vhead = self.value_head(x[:, CLS_TOKEN, :])       # (B,1) or (B,3)
+        if self.wdl:
+            wdl_logits = vhead                            # (B,3): win/draw/loss
+            probs = torch.softmax(wdl_logits, dim=-1)
+            value = probs[:, 0] - probs[:, 2]             # scalar in (-1,1), MCTS-compatible
+        else:
+            wdl_logits = None
+            value = torch.tanh(vhead).squeeze(-1)         # (B,)
+        if return_wdl:
+            return policy, value, (attns if return_attn else None), wdl_logits
         return policy, value, (attns if return_attn else None)
 
 

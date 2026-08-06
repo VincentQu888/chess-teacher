@@ -35,7 +35,11 @@ from train import pick_device
 
 def default_ckpt() -> str:
     here = os.path.dirname(os.path.abspath(__file__))
-    for cand in ("checkpoints_v5/best.pt", "checkpoints_v4/best.pt",
+    # Prefer the self-play (expert-iteration) net if present; it keeps the same
+    # attention architecture, so the attention-weighted saliency is unchanged but
+    # comes from the strongest available net.
+    for cand in ("ei/best.pt",
+                 "checkpoints_v5/best.pt", "checkpoints_v4/best.pt",
                  "checkpoints_v3/best.pt", "checkpoints_v2/best.pt",
                  "checkpoints/best.pt", "checkpoints_v1/best.pt"):
         p = os.path.join(here, cand)
