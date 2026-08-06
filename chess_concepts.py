@@ -20,7 +20,7 @@ Design:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional
 
 import chess
 
@@ -58,8 +58,6 @@ def cname(color: chess.Color) -> str:
     return "White" if color == WHITE else "Black"
 
 
-def pname(pt: int) -> str:
-    return chess.piece_name(pt)
 
 
 def sqn(s: int) -> str:
@@ -68,6 +66,12 @@ def sqn(s: int) -> str:
 
 def val(pt: int) -> int:
     return PIECE_VALUES[pt]
+
+
+def non_king_material(board: chess.Board, color: chess.Color) -> int:
+    """Total piece value (excluding kings) for ``color``, in PIECE_VALUES units."""
+    return sum(val(p.piece_type) for s in chess.SQUARES
+               if (p := board.piece_at(s)) and p.color == color and p.piece_type != chess.KING)
 
 
 def static_exchange_eval(board: chess.Board, target_square: int,
@@ -670,7 +674,7 @@ def detect_zwischenzug(board: chess.Board) -> List[Concept]:
         return []
     res = shallow_tactic_cached(board)
     if res:
-        mv, gain, is_mate = res
+        mv, _, _ = res
         if mv not in recaptures and (board.gives_check(mv) or board.is_capture(mv)):
             return [Concept("Zwischenzug (in-between move)", "tactical",
                             f"instead of recapturing, the in-between {mv.uci()} wins more",
@@ -702,7 +706,7 @@ def detect_interference(board: chess.Board) -> List[Concept]:
     res = shallow_tactic_cached(board)
     if not res:
         return []
-    mv, gain, is_mate = res
+    mv, _, _ = res
     if board.is_capture(mv) or board.gives_check(mv):
         return []
     to = mv.to_square
@@ -724,7 +728,7 @@ def detect_decoy(board: chess.Board) -> List[Concept]:
     res = shallow_tactic_cached(board)
     if not res:
         return []
-    mv, gain, is_mate = res
+    mv, _, _ = res
     mover = board.turn
     board.push(mv)
     gives_check = board.is_check()
@@ -744,7 +748,7 @@ def detect_clearance(board: chess.Board) -> List[Concept]:
     res = shallow_tactic_cached(board)
     if not res:
         return []
-    mv, gain, is_mate = res
+    mv, _, _ = res
     mover = board.turn
     frm = mv.from_square
     for S in pieces_of(board, mover, SLIDING):
@@ -774,7 +778,7 @@ def detect_counterattack(board: chess.Board) -> List[Concept]:
         return []
     res = shallow_tactic_cached(board)
     if res:
-        mv, gain, is_mate = res
+        mv, _, _ = res
         if mv.from_square not in my_hanging or board.gives_check(mv):
             return [Concept("Counterattack", "tactical",
                             f"rather than defend, {mv.uci()} creates a bigger threat",
@@ -1162,10 +1166,6 @@ def detect_fianchetto(board: chess.Board) -> List[Concept]:
 
 def detect_long_diagonal(board: chess.Board) -> List[Concept]:
     out: List[Concept] = []
-    long_diags = {
-        (0, 0): "a1-h8", (7, 7): "a1-h8",
-        (0, 7): "a8-h1", (7, 0): "a8-h1",
-    }
     for color in (WHITE, BLACK):
         for s in pieces_of(board, color, {chess.BISHOP, chess.QUEEN}):
             reach = board.attacks(s)
@@ -1751,7 +1751,6 @@ def _looks_like_zugzwang(board: chess.Board) -> bool:
     # KP endgame: if the side to move only has king moves (pawns blocked) and every king
     # move loses the opposition / a pawn. Cheap heuristic: no pawn moves available and
     # king is tied to defense.
-    mover = board.turn
     pawn_moves = [m for m in board.legal_moves if board.piece_at(m.from_square)
                   and board.piece_at(m.from_square).piece_type == chess.PAWN]
     king_moves = [m for m in board.legal_moves if board.piece_at(m.from_square)
@@ -1838,7 +1837,7 @@ def _detect_wrong_bishop(board, pawns) -> List[Concept]:
         other = pieces_of(board, color, {chess.QUEEN, chess.ROOK, chess.KNIGHT})
         enemy_pieces = pieces_of(board, not color, {chess.QUEEN, chess.ROOK, chess.KNIGHT, chess.BISHOP})
         if len(bishops) == 1 and len(own_pawns) == 1 and not other and not enemy_pieces:
-            f, r = own_pawns[0]
+            f, _ = own_pawns[0]
             if f in (0, 7):  # rook pawn
                 promo = chess.square(f, 7 if color == WHITE else 0)
                 promo_color = (chess.square_file(promo) + chess.square_rank(promo)) % 2
@@ -1917,17 +1916,14 @@ def detect_opening_principles(board: chess.Board, moves: Optional[List[str]] = N
 def _opening_from_moves(board: chess.Board, moves: List[str]) -> List[Concept]:
     out = []
     b = chess.Board()
-    piece_move_count: Dict[Tuple[chess.Color, int], int] = {}
     knight_dev = {WHITE: None, BLACK: None}
     bishop_dev = {WHITE: None, BLACK: None}
-    order_flag = {WHITE: False, BLACK: False}
     try:
         for i, uci in enumerate(moves):
             mv = chess.Move.from_uci(uci) if len(uci) >= 4 and uci[1].isdigit() else b.parse_san(uci)
             color = b.turn
             piece = b.piece_at(mv.from_square)
             if piece:
-                key = (color, mv.to_square)
                 # track same-piece-twice in opening
                 if piece.piece_type in (chess.KNIGHT, chess.BISHOP):
                     ply = i // 2 + 1
@@ -1951,10 +1947,8 @@ def detect_gambit(board: chess.Board) -> List[Concept]:
     """Material-down early with a development lead => gambit/initiative for the pawn."""
     if board.fullmove_number > 15:
         return []
-    wv = sum(val(board.piece_at(s).piece_type) for s in chess.SQUARES
-             if board.piece_at(s) and board.piece_at(s).color == WHITE and board.piece_at(s).piece_type != chess.KING)
-    bv = sum(val(board.piece_at(s).piece_type) for s in chess.SQUARES
-             if board.piece_at(s) and board.piece_at(s).color == BLACK and board.piece_at(s).piece_type != chess.KING)
+    wv = non_king_material(board, WHITE)
+    bv = non_king_material(board, BLACK)
     diff = wv - bv
     if abs(diff) == 1:  # a pawn down
         down = WHITE if diff < 0 else BLACK
@@ -2289,7 +2283,6 @@ def _detect_two_weaknesses(board: chess.Board) -> List[Concept]:
     for color in (WHITE, BLACK):
         weaknesses = 0
         own = pawns[color]
-        enemy = pawns[not color]
         # isolated/backward/doubled pawns count as weaknesses
         for f, ranks in own.items():
             if (f - 1) not in own and (f + 1) not in own:
@@ -2304,10 +2297,8 @@ def _detect_two_weaknesses(board: chess.Board) -> List[Concept]:
 
 
 def _detect_trade_advice(board: chess.Board) -> List[Concept]:
-    wv = sum(val(board.piece_at(s).piece_type) for s in chess.SQUARES
-             if board.piece_at(s) and board.piece_at(s).color == WHITE and board.piece_at(s).piece_type != chess.KING)
-    bv = sum(val(board.piece_at(s).piece_type) for s in chess.SQUARES
-             if board.piece_at(s) and board.piece_at(s).color == BLACK and board.piece_at(s).piece_type != chess.KING)
+    wv = non_king_material(board, WHITE)
+    bv = non_king_material(board, BLACK)
     diff = wv - bv
     if abs(diff) >= 2:
         ahead = WHITE if diff > 0 else BLACK
@@ -2406,10 +2397,8 @@ def detect_positional_pawn_sac(board: chess.Board) -> List[Concept]:
     mover = board.turn
     lever = _detect_levers(board)
     if lever:
-        wv = sum(val(board.piece_at(s).piece_type) for s in chess.SQUARES
-                 if board.piece_at(s) and board.piece_at(s).color == WHITE and board.piece_at(s).piece_type != chess.KING)
-        bv = sum(val(board.piece_at(s).piece_type) for s in chess.SQUARES
-                 if board.piece_at(s) and board.piece_at(s).color == BLACK and board.piece_at(s).piece_type != chess.KING)
+        wv = non_king_material(board, WHITE)
+        bv = non_king_material(board, BLACK)
         if abs(wv - bv) <= 1 and _dev_count(board, mover) < _dev_count(board, not mover):
             return [Concept("Positional pawn sacrifice", "material",
                             "a pawn break here offers a positional pawn sacrifice for the initiative",
@@ -2418,10 +2407,8 @@ def detect_positional_pawn_sac(board: chess.Board) -> List[Concept]:
 
 
 def detect_compensation(board: chess.Board) -> List[Concept]:
-    wv = sum(val(board.piece_at(s).piece_type) for s in chess.SQUARES
-             if board.piece_at(s) and board.piece_at(s).color == WHITE and board.piece_at(s).piece_type != chess.KING)
-    bv = sum(val(board.piece_at(s).piece_type) for s in chess.SQUARES
-             if board.piece_at(s) and board.piece_at(s).color == BLACK and board.piece_at(s).piece_type != chess.KING)
+    wv = non_king_material(board, WHITE)
+    bv = non_king_material(board, BLACK)
     diff = wv - bv
     if abs(diff) in (1, 2, 3):
         down = WHITE if diff < 0 else BLACK

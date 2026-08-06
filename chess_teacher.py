@@ -38,6 +38,18 @@ CENTER_SQUARES = {
     chess.E5,
 }
 
+
+def cname(color: chess.Color) -> str:
+    """"White" or "Black" for a python-chess color."""
+    return "White" if color == chess.WHITE else "Black"
+
+
+def enemy_targets(board: chess.Board, square: int, color: chess.Color) -> List[str]:
+    """Labels (e.g. 'Nf6') of enemy pieces currently attacked from ``square``."""
+    return [f"{tp.symbol().upper()}{chess.square_name(t)}"
+            for t in board.attacks(square)
+            if (tp := board.piece_at(t)) and tp.color != color]
+
 DEFAULT_MODEL = os.getenv("CHESS_TEACHER_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
 TOKEN_FILE_NAME = "api_token.txt"
 DEFAULT_ROUTER_TIMEOUT = 60
@@ -269,7 +281,7 @@ def position_facts(board: chess.Board) -> List[str]:
     contested_facts: List[str] = []
 
     for color in (chess.WHITE, chess.BLACK):
-        color_name = "White" if color == chess.WHITE else "Black"
+        color_name = cname(color)
         for square in chess.SQUARES:
             piece = board.piece_at(square)
             if not piece or piece.color != color or piece.piece_type == chess.KING:
@@ -334,7 +346,7 @@ def positional_facts(board: chess.Board) -> List[str]:
 
     # --- Pawn structure: doubled, isolated, passed ---
     for color in (chess.WHITE, chess.BLACK):
-        color_name = "White" if color == chess.WHITE else "Black"
+        color_name = cname(color)
         own = pawns[color]
         enemy = pawns[not color]
 
@@ -382,7 +394,7 @@ def positional_facts(board: chess.Board) -> List[str]:
     if open_files:
         facts.append(f"Open file(s) (no pawns): {', '.join(open_files)}")
     for color in (chess.WHITE, chess.BLACK):
-        color_name = "White" if color == chess.WHITE else "Black"
+        color_name = cname(color)
         semi = [
             chess.FILE_NAMES[f]
             for f in range(8)
@@ -393,7 +405,7 @@ def positional_facts(board: chess.Board) -> List[str]:
 
     # --- Bishops and color complex ---
     for color in (chess.WHITE, chess.BLACK):
-        color_name = "White" if color == chess.WHITE else "Black"
+        color_name = cname(color)
         bishop_squares = [
             sq
             for sq in chess.SQUARES
@@ -427,7 +439,7 @@ def positional_facts(board: chess.Board) -> List[str]:
 
     # --- King safety ---
     for color in (chess.WHITE, chess.BLACK):
-        color_name = "White" if color == chess.WHITE else "Black"
+        color_name = cname(color)
         king_sq = board.king(color)
         if king_sq is None:
             continue
@@ -459,7 +471,7 @@ def positional_facts(board: chess.Board) -> List[str]:
     # --- Outpost squares (in opponent's half, defended by own pawn,
     #     not challengeable by any enemy pawn) ---
     for color in (chess.WHITE, chess.BLACK):
-        color_name = "White" if color == chess.WHITE else "Black"
+        color_name = cname(color)
         outposts = []
         for sq in chess.SQUARES:
             f = chess.square_file(sq)
@@ -625,7 +637,7 @@ def piece_placement_summary(board: chess.Board) -> str:
     }
     out = []
     for color in (chess.WHITE, chess.BLACK):
-        color_name = "White" if color == chess.WHITE else "Black"
+        color_name = cname(color)
         by_type: Dict[int, List[str]] = {}
         for sq in chess.SQUARES:
             p = board.piece_at(sq)
@@ -652,14 +664,10 @@ def attack_relations(board: chess.Board) -> List[str]:
         p = board.piece_at(sq)
         if not p:
             continue
-        targets = []
-        for t in board.attacks(sq):
-            tp = board.piece_at(t)
-            if tp and tp.color != p.color:
-                targets.append(f"{tp.symbol().upper()}{chess.square_name(t)}")
+        targets = enemy_targets(board, sq, p.color)
         if not targets:
             continue
-        color_name = "White" if p.color == chess.WHITE else "Black"
+        color_name = cname(p.color)
         piece_name = chess.piece_name(p.piece_type)
         rels.append(
             f"{color_name} {piece_name} on {chess.square_name(sq)} attacks "
@@ -691,7 +699,7 @@ def defense_relations(board: chess.Board) -> List[str]:
                 defenders.append(f"{dp.symbol().upper()}{chess.square_name(d)}")
         if not defenders:
             continue
-        color_name = "White" if p.color == chess.WHITE else "Black"
+        color_name = cname(p.color)
         piece_name = chess.piece_name(p.piece_type)
         rels.append(
             f"{color_name} {piece_name} on {chess.square_name(sq)} is defended by "
@@ -705,7 +713,7 @@ def pin_descriptions(board: chess.Board) -> List[str]:
     pin line from king through pinned piece to identify the pinner."""
     items: List[str] = []
     for color in (chess.WHITE, chess.BLACK):
-        color_name = "White" if color == chess.WHITE else "Black"
+        color_name = cname(color)
         king_sq = board.king(color)
         if king_sq is None:
             continue
@@ -758,14 +766,10 @@ def existing_forks(board: chess.Board) -> List[str]:
             continue
         if not creates_fork(board, sq, p.color):
             continue
-        targets = []
-        for t in board.attacks(sq):
-            tp = board.piece_at(t)
-            if tp and tp.color != p.color:
-                targets.append(f"{tp.symbol().upper()}{chess.square_name(t)}")
+        targets = enemy_targets(board, sq, p.color)
         if len(targets) < 2:
             continue
-        color_name = "White" if p.color == chess.WHITE else "Black"
+        color_name = cname(p.color)
         piece_name = chess.piece_name(p.piece_type)
         items.append(
             f"{color_name} {piece_name} on {chess.square_name(sq)} FORKS "
@@ -779,7 +783,7 @@ def king_zone_threats(board: chess.Board) -> List[str]:
     proxy for king-attack pressure."""
     items: List[str] = []
     for color in (chess.WHITE, chess.BLACK):
-        color_name = "White" if color == chess.WHITE else "Black"
+        color_name = cname(color)
         king_sq = board.king(color)
         if king_sq is None:
             continue
@@ -811,7 +815,7 @@ def position_meta(board: chess.Board) -> List[str]:
     items: List[str] = []
 
     if board.is_check():
-        side = "White" if board.turn == chess.WHITE else "Black"
+        side = cname(board.turn)
         items.append(f"{side} is in CHECK")
 
     rights = []
@@ -861,7 +865,7 @@ def best_move_anchor(board: chess.Board, engine_lines: List["LineResult"]) -> st
     """One-line callout naming the engine's #1 move with score, ply notation, and a
     short continuation. Pinned at the top of the prompt to keep the LLM from
     inventing its own 'best move'."""
-    side = "White" if board.turn == chess.WHITE else "Black"
+    side = cname(board.turn)
     if not engine_lines or not engine_lines[0].moves:
         return f"ENGINE'S BEST MOVE for {side}: (no engine output available)"
     best = engine_lines[0]
@@ -1039,11 +1043,9 @@ def safe_json_loads(text: str) -> Optional[dict]:
         return None
 
 
-def _ollama_generate(prompt: str, model: str, max_new_tokens: int, temperature: float) -> str:
-    """Local LLM via Ollama's OpenAI-compatible endpoint (free, offline)."""
-    base = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-    url = f"{base}/v1/chat/completions"
-    payload = {
+def _chat_payload(model: str, prompt: str, max_new_tokens: int, temperature: float) -> dict:
+    """OpenAI-compatible chat-completion request body shared by the LLM backends."""
+    return {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_new_tokens,
@@ -1051,6 +1053,13 @@ def _ollama_generate(prompt: str, model: str, max_new_tokens: int, temperature: 
         "top_p": 0.9,
         "stream": False,
     }
+
+
+def _ollama_generate(prompt: str, model: str, max_new_tokens: int, temperature: float) -> str:
+    """Local LLM via Ollama's OpenAI-compatible endpoint (free, offline)."""
+    base = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+    url = f"{base}/v1/chat/completions"
+    payload = _chat_payload(model, prompt, max_new_tokens, temperature)
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url, data=data, headers={"Content-Type": "application/json"}, method="POST"
@@ -1134,14 +1143,7 @@ def hf_generate(
 
     url = "https://router.huggingface.co/v1/chat/completions"
     timeout_seconds = int(os.getenv("HF_ROUTER_TIMEOUT", str(DEFAULT_ROUTER_TIMEOUT)))
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_new_tokens,
-        "temperature": temperature,
-        "top_p": 0.9,
-        "stream": False,
-    }
+    payload = _chat_payload(model, prompt, max_new_tokens, temperature)
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -1205,7 +1207,7 @@ def llm_candidate_lines(
     ).format(
         max_candidates=max_candidates,
         fen=board.fen(),
-        side="White" if board.turn == chess.WHITE else "Black",
+        side=cname(board.turn),
         legal=legal_list,
         question=prompt,
     )
@@ -1482,7 +1484,7 @@ def format_moves_with_sides(board: chess.Board, moves: List[str]) -> str:
     fullmove = board.fullmove_number
     parts: List[str] = []
     for mv in moves:
-        side = "White" if turn == chess.WHITE else "Black"
+        side = cname(turn)
         if turn == chess.WHITE:
             parts.append(f"{side}: {fullmove}.{mv}")
         else:
@@ -1873,8 +1875,8 @@ def format_move_verdict(
     """Deterministic, correct plain-English verdict for a specific move, built ONLY
     from labeled engine moves + verified per-move tags + the evaluation. Avoids the
     LLM misreading squares/targets when explaining 'why not X'."""
-    side = "White" if board.turn == chess.WHITE else "Black"
-    opp = "Black" if board.turn == chess.WHITE else "White"
+    side = cname(board.turn)
+    opp = cname(not board.turn)
     labeled = format_moves_with_sides(board, move_line.moves[:6])
     h_score = format_score(move_line.score)
     h_cp = _cp_of(move_line.score)
@@ -1999,7 +2001,7 @@ def describe_best_move(board: chess.Board, engine_lines: List[LineResult]) -> Op
         mv = parse_move(b, san)
     except ValueError:
         return None
-    side = "White" if board.turn == chess.WHITE else "Black"
+    side = cname(board.turn)
     piece = b.piece_at(mv.from_square)
     pn = chess.piece_name(piece.piece_type) if piece else "piece"
     from_sq = chess.square_name(mv.from_square)
@@ -2079,7 +2081,7 @@ def describe_why_move(board: chess.Board, move_san: str,
     except ValueError:
         return None
     color = board.turn
-    side = "White" if color == chess.WHITE else "Black"
+    side = cname(color)
     piece = b.piece_at(mv.from_square)
     if piece is None:
         return None
@@ -2216,8 +2218,8 @@ def llm_explain(
     candidate_text = "\n".join(format_line_for_prompt(board, line) for line in candidate_lines)
     ground_truth = build_ground_truth_block(board, include_attention)
     anchor = best_move_anchor(board, engine_lines)
-    side_name = "White" if board.turn == chess.WHITE else "Black"
-    opponent_name = "Black" if board.turn == chess.WHITE else "White"
+    side_name = cname(board.turn)
+    opponent_name = cname(not board.turn)
 
     expl_prompt = (
         "You are a chess coach. ANSWER THE USER'S QUESTION directly and specifically.\n\n"
@@ -2372,8 +2374,8 @@ def llm_followup(
     history_text = format_history_for_prompt(history)
     ground_truth = build_ground_truth_block(board, include_attention)
     anchor = best_move_anchor(board, engine_lines)
-    side_name = "White" if board.turn == chess.WHITE else "Black"
-    opponent_name = "Black" if board.turn == chess.WHITE else "White"
+    side_name = cname(board.turn)
+    opponent_name = cname(not board.turn)
 
     follow_prompt = (
         "You are a chess coach continuing a conversation.\n"

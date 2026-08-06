@@ -30,7 +30,6 @@ import torch
 
 from attention_explain import attention_report, format_report_for_prompt
 from evaluate import load_net
-from train import pick_device
 
 
 def default_ckpt() -> str:

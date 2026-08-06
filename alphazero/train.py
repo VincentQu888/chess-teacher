@@ -12,7 +12,6 @@ import argparse
 import glob
 import os
 import time
-from typing import List
 
 import numpy as np
 import torch
@@ -214,7 +213,7 @@ def main():
         filtered = {k: v for k, v in sd.items()
                     if k in model_sd and model_sd[k].shape == v.shape}
         dropped = [k for k in sd if k not in filtered]
-        missing = net.load_state_dict(filtered, strict=False)
+        net.load_state_dict(filtered, strict=False)
         print(f"[train] warm-started {len(filtered)}/{len(sd)} tensors from {args.warm_start} "
               f"(reinit: {sorted(set(k.split('.')[0] for k in dropped)) or 'none'}; cfg {vars(cfg)})")
     if args.resume and os.path.exists(args.resume):

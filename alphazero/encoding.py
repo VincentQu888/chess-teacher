@@ -181,12 +181,6 @@ def legal_moves_with_indices(
     return real_moves, np.asarray(idxs, dtype=np.int64)
 
 
-def best_move_target_index(board: chess.Board, best_move: chess.Move) -> int:
-    """Policy target index for a move played on the *original* board."""
-    _, mirrored = canonical_board(board)
-    canon_mv = mirror_move(best_move) if mirrored else best_move
-    return move_to_index(canon_mv)
-
 
 # ---------------------------------------------------------------------------
 # Value target helpers
@@ -195,8 +189,3 @@ def best_move_target_index(board: chess.Board, best_move: chess.Move) -> int:
 def cp_to_value(cp: float, scale: float = 300.0) -> float:
     """Centipawn eval (from side-to-move) -> value in (-1, 1) via a logistic."""
     return float(np.tanh(cp / scale))
-
-
-def mate_to_value(mate_in: int) -> float:
-    """Mate score -> +/-1 (sign follows who is mating)."""
-    return 1.0 if mate_in > 0 else -1.0

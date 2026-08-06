@@ -189,7 +189,6 @@ def count_params(model: nn.Module) -> int:
 
 
 if __name__ == "__main__":  # tiny smoke test
-    import numpy as np
     from encoding import encode_position
     import chess
 

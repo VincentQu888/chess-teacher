@@ -186,6 +186,29 @@ class MCTS:
         # side to move is checkmated (loss) if it's game over with a decisive result
         return -1.0
 
+    def _descend(self, root: Node, board: chess.Board, apply_vloss: bool):
+        """Walk root -> leaf via PUCT selection, creating child nodes lazily.
+
+        Returns (leaf_node, board_at_leaf, path). Applies virtual loss along the
+        path when ``apply_vloss`` is set (used by the batched collector)."""
+        node = root
+        b = board.copy()
+        path: List[Tuple[Node, int]] = []
+        while node.expanded and not b.is_game_over() and len(node.moves) > 0:
+            a = self._select(node)
+            path.append((node, a))
+            if apply_vloss:
+                self._apply_vloss(node, a)
+            b.push(node.moves[a])
+            child = node.children.get(a)
+            if child is None:
+                child = Node(b.turn)
+                node.children[a] = child
+            node = child
+            if not node.expanded:
+                break
+        return node, b, path
+
     def search(self, board: chess.Board) -> Node:
         """Batched PUCT search with virtual loss (batch_size leaves per NN forward)."""
         root = Node(board.turn)
@@ -202,21 +225,7 @@ class MCTS:
             tries = 0
             while len(collected) < batch and tries < batch * 4:
                 tries += 1
-                node = root
-                b = board.copy()
-                path: List[Tuple[Node, int]] = []
-                while node.expanded and not b.is_game_over() and len(node.moves) > 0:
-                    a = self._select(node)
-                    path.append((node, a))
-                    self._apply_vloss(node, a)
-                    b.push(node.moves[a])
-                    child = node.children.get(a)
-                    if child is None:
-                        child = Node(b.turn)
-                        node.children[a] = child
-                    node = child
-                    if not node.expanded:
-                        break
+                node, b, path = self._descend(root, board, apply_vloss=True)
                 if b.is_game_over():
                     self._backup_vloss(path, self._terminal_value(b))
                     done += 1
@@ -245,20 +254,7 @@ class MCTS:
         return root
 
     def _one_sequential_sim(self, root: Node, board: chess.Board) -> int:
-        node = root
-        b = board.copy()
-        path: List[Tuple[Node, int]] = []
-        while node.expanded and not b.is_game_over() and len(node.moves) > 0:
-            a = self._select(node)
-            path.append((node, a))
-            b.push(node.moves[a])
-            child = node.children.get(a)
-            if child is None:
-                child = Node(b.turn)
-                node.children[a] = child
-            node = child
-            if not node.expanded:
-                break
+        node, b, path = self._descend(root, board, apply_vloss=False)
         if b.is_game_over():
             leaf_value = self._terminal_value(b)
         else:

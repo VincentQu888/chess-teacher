@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import math
-import os
 import random
 from typing import List
 

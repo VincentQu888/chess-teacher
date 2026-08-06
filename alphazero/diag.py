@@ -16,7 +16,6 @@ import random
 
 import chess
 import chess.engine
-import torch
 
 from mcts import MCTS
 from evaluate import load_net, OPENINGS
