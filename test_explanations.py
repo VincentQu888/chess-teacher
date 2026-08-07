@@ -155,6 +155,33 @@ def test_why_cant_i_play_is_a_verdict_not_a_why_good_question():
     assert _why_move_question(b, "why is this trade good?") is True
 
 
+def test_guard_verifies_double_check_claims():
+    # A genuine double check must PASS (Nd7+ uncovers Qg3->b8 while the knight also
+    # checks); a false 'double check' must be FLAGGED.
+    b_true = chess.Board("1k5r/1p3pp1/p3p2p/Pn2N3/q7/6QP/5PP1/3R2K1 w - - 0 1")
+    lines_true = [LineResult("e", ["Nd7+"], {"cp": 900}, [], "engine")]
+    assert _faithfulness_violations(
+        b_true, "Nd7+ is a double check, so the black king is forced to move away.",
+        lines_true, "") == []
+    b_false = chess.Board("8/4N1pk/8/R7/8/8/8/6K1 w - - 0 1")
+    lines_false = [LineResult("e", ["Rh5"], {"mate": 1}, [], "engine")]
+    assert _faithfulness_violations(
+        b_false, "Rh5 is a double check that finishes the black king off immediately here.",
+        lines_false, "")
+
+
+def test_forcing_line_narration_is_engine_free_and_names_payoff():
+    from chess_teacher import explain_forcing_line
+    b = chess.Board("1k5r/1p3pp1/p3p2p/Pn2N3/q7/6QP/5PP1/3R2K1 w - - 0 1")
+    # A hand-supplied forcing line ending in a king+queen knight fork winning the queen.
+    text = explain_forcing_line(b, ["Nd7+", "Ka8", "Nb6+", "Ka7", "Nxa4"])
+    assert text and "forcing sequence" in text.lower()
+    assert "forks the king and the queen" in text.lower()
+    assert "wins the queen" in text.lower()
+    # too-short / non-tactical inputs yield nothing
+    assert explain_forcing_line(b, ["Nd7+"]) is None
+
+
 def test_opening_id_says_dont_know_when_not_in_eco():
     import chess_concepts as cc
     from chess_teacher import _is_opening_question, _opening_answer
@@ -191,6 +218,8 @@ if __name__ == "__main__":
     test_why_cant_i_play_is_a_verdict_not_a_why_good_question()
     test_verdict_names_the_pin_behind_a_losing_capture()
     test_faithfulness_guard_flags_hallucinations_and_passes_truth()
+    test_guard_verifies_double_check_claims()
+    test_forcing_line_narration_is_engine_free_and_names_payoff()
     test_opening_id_says_dont_know_when_not_in_eco()
     test_concept_layer_faithful_on_sample_positions()
     print("all explanation-faithfulness tests passed")

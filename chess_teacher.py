@@ -1519,6 +1519,106 @@ def format_moves_with_sides(board: chess.Board, moves: List[str]) -> str:
     return " -> ".join(parts)
 
 
+def _pov_val(info, turn: chess.Color) -> int:
+    s = info["score"].pov(turn)
+    if s.is_mate():
+        m = s.mate()
+        return (100000 - m) if m > 0 else (-100000 - m)
+    return s.score(mate_score=100000)
+
+
+def forcing_line(board: chess.Board, engine: chess.engine.SimpleEngine,
+                 max_plies: int = 10, depth: int = 18) -> List[str]:
+    """Follow the engine's single coherent mainline (root PV) but only while the play
+    stays FORCING — i.e. each move is a check, a capture, or a reply to a check / an
+    only-move (<=2 legal). Stop at the first genuinely quiet move (the position stops
+    having 'only a few moves that work'), or at the payoff (a move that wins >= a rook,
+    or checkmate). Only pursues a sharp start, so it returns [] for ordinary positions."""
+    try:
+        info = engine.analyse(board, chess.engine.Limit(depth=depth))
+    except Exception:
+        return []
+    pv = info.get("pv", []) if isinstance(info, dict) else []
+    if not pv:
+        return []
+    if not (board.is_check() or board.gives_check(pv[0]) or board.is_capture(pv[0])
+            or abs(_pov_val(info, board.turn)) >= 200):
+        return []
+    moves: List[str] = []
+    b = board.copy()
+    prev_was_check = b.is_check()
+    for mv in pv[:max_plies]:
+        if mv not in b.legal_moves:
+            break
+        gives_check = b.gives_check(mv)
+        is_cap = b.is_capture(mv)
+        forcing = prev_was_check or b.is_check() or gives_check or is_cap or b.legal_moves.count() <= 2
+        if not forcing and moves:
+            break  # first quiet move after the forcing run -> stop
+        won = 0
+        if is_cap and not b.is_en_passant(mv):
+            cap = b.piece_at(mv.to_square)
+            if cap and static_exchange_eval(b, mv.to_square, b.turn) > 0:
+                won = PIECE_VALUES[cap.piece_type]
+        moves.append(b.san(mv))
+        b.push(mv)
+        prev_was_check = gives_check
+        if b.is_checkmate() or won >= 5:
+            break
+    return moves
+
+
+def explain_forcing_line(board: chess.Board, moves: List[str]) -> Optional[str]:
+    """Narrate a forcing sequence and NAME its tactical payoff (a fork of the king plus
+    a piece, and/or the material it wins, and/or mate). Engine-free. Returns None when
+    the line is too short or has no clear tactical point."""
+    if not moves or len(moves) < 3:
+        return None
+    b = board.copy()
+    labeled = format_moves_with_sides(board, moves)
+    fork_note = None
+    win_note = None
+    for idx, san in enumerate(moves):
+        try:
+            mv = b.parse_san(san)
+        except ValueError:
+            return None
+        mover = b.turn
+        is_cap = b.is_capture(mv)
+        cap_pt = None
+        if is_cap and not b.is_en_passant(mv):
+            cp = b.piece_at(mv.to_square)
+            cap_pt = cp.piece_type if cp else None
+        b.push(mv)
+        to = mv.to_square
+        pc = b.piece_at(to)
+        if pc and pc.piece_type != chess.KING and fork_note is None:
+            enemy = not mover
+            targets = [s for s in b.attacks(to)
+                       if b.piece_at(s) and b.piece_at(s).color == enemy]
+            has_king = any(b.piece_at(s).piece_type == chess.KING for s in targets)
+            valuable = [s for s in targets if b.piece_at(s).piece_type != chess.KING
+                        and PIECE_VALUES[b.piece_at(s).piece_type] >= 3]
+            if has_king and valuable:
+                tgt = max(valuable, key=lambda s: PIECE_VALUES[b.piece_at(s).piece_type])
+                fork_note = (f"{san} forks the king and the "
+                             f"{chess.piece_name(b.piece_at(tgt).piece_type)} on "
+                             f"{chess.square_name(tgt)}")
+        if idx == len(moves) - 1 and is_cap and cap_pt and PIECE_VALUES.get(cap_pt, 0) >= 5:
+            win_note = f"the sequence wins the {chess.piece_name(cap_pt)}"
+    parts = [f"The point is a forcing sequence: {labeled}."]
+    if fork_note:
+        parts.append(fork_note[0].upper() + fork_note[1:] + ".")
+    if win_note:
+        parts.append(win_note[0].upper() + win_note[1:] + ".")
+    if not fork_note and not win_note:
+        if b.is_checkmate():
+            parts.append("It ends in checkmate.")
+        else:
+            return None
+    return " ".join(parts)
+
+
 def format_line_for_prompt(board: chess.Board, line: LineResult) -> str:
     annotated = format_moves_with_sides(board, line.moves)
     tags = format_tags_for_prompt(board, line.tags)
@@ -2387,6 +2487,22 @@ def _faithfulness_violations(board: chess.Board, text: str,
         if b_sq not in board.attacks(a_sq):
             out.append(f"it claims the piece on {m.group(1)} attacks/controls "
                        f"{m.group(2)}, but it does not")
+    if "double check" in low:
+        roots = {l.moves[0] for l in (lines or []) if l.moves}
+        roots.update(_MOVE_TOKEN_RE.findall(text))
+        gives_double = False
+        for san in roots:
+            try:
+                bb = board.copy()
+                bb.push(board.parse_san(san))
+            except Exception:
+                continue
+            if len(bb.checkers()) == 2:
+                gives_double = True
+                break
+        if not gives_double:
+            out.append("it describes a move as a 'double check', but no move here "
+                       "delivers a double check (it's a single check)")
     seen = set()
     uniq = []
     for v in out:
@@ -2486,6 +2602,15 @@ def _is_opening_question(q: str) -> bool:
     ))
 
 
+def _is_line_question(q: str) -> bool:
+    ql = q.lower()
+    return any(k in ql for k in (
+        "the line", "this line", "explain the line", "the continuation", "continuation",
+        "what happens after", "what happens if", "how does this work", "how does it work",
+        "why does this work", "why does it work", "the whole line", "the sequence",
+    ))
+
+
 def _opening_answer(board: chess.Board) -> str:
     """Honest opening identification: state the exact ECO book line if the position is
     in the book, otherwise say we can't identify it. Never a structural guess (which
@@ -2505,6 +2630,7 @@ def llm_explain(
     candidate_lines: List[LineResult],
     model: str,
     include_attention: bool = True,
+    forcing_line_text: Optional[str] = None,
 ) -> str:
     # Opening-identification questions: answer only from the ECO book, else say we don't
     # know (deterministic — no structural guessing, no LLM opening-theory hallucination).
@@ -2513,8 +2639,14 @@ def llm_explain(
     # Move questions: get the VERIFIED analysis, then let the LLM phrase it richly with
     # a faithfulness guard + fallback (no more terse deterministic short-circuit).
     verified = _verified_answer(board, prompt, engine_lines, candidate_lines)
+    want_line = _is_line_question(prompt) or _best_move_question(prompt)
     if verified is not None:
+        if forcing_line_text and want_line and forcing_line_text not in verified:
+            verified = verified + " " + forcing_line_text
         return _enrich_verified(board, prompt, verified, engine_lines,
+                                candidate_lines, model, include_attention)
+    if forcing_line_text and want_line:
+        return _enrich_verified(board, prompt, forcing_line_text, engine_lines,
                                 candidate_lines, model, include_attention)
     illegal = _illegal_move_note(board, prompt)
     if illegal is not None:
@@ -2616,6 +2748,7 @@ def llm_followup(
     model: str,
     hypothetical_lines: Optional[List[LineResult]] = None,
     include_attention: bool = True,
+    forcing_line_text: Optional[str] = None,
 ) -> str:
     # Opening-identification questions: ECO book only, else an honest 'I don't know'.
     if _is_opening_question(question):
@@ -2623,8 +2756,14 @@ def llm_followup(
     # Move questions: VERIFIED analysis -> LLM enrichment with guard + fallback.
     extra = list(hypothetical_lines or []) + list(candidate_lines)
     verified = _verified_answer(board, question, engine_lines, extra)
+    want_line = _is_line_question(question) or _best_move_question(question)
     if verified is not None:
+        if forcing_line_text and want_line and forcing_line_text not in verified:
+            verified = verified + " " + forcing_line_text
         return _enrich_verified(board, question, verified, engine_lines, extra,
+                                model, include_attention)
+    if forcing_line_text and want_line:
+        return _enrich_verified(board, question, forcing_line_text, engine_lines, extra,
                                 model, include_attention)
     illegal = _illegal_move_note(board, question)
     if illegal is not None:

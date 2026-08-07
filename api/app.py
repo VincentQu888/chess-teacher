@@ -90,6 +90,7 @@ def analyze(request: AnalyzeRequest) -> dict:
     engine_lines = []
     candidate_lines = []
 
+    forcing_text = None
     with ct.chess.engine.SimpleEngine.popen_uci(str(engine_path)) as engine:
         engine.configure({"Threads": request.threads})
         engine_lines = ct.engine_top_lines(
@@ -99,6 +100,10 @@ def analyze(request: AnalyzeRequest) -> dict:
             request.top,
             request.pv_plies,
         )
+        try:
+            forcing_text = ct.explain_forcing_line(board, ct.forcing_line(board, engine))
+        except Exception:
+            forcing_text = None
         # Engine multipv + user-mentioned moves already supply candidate lines;
         # skip the extra (slow) LLM candidate-generation call. Opt in via `llm_candidates`.
         candidate_lines = ct.build_candidate_lines(
@@ -123,6 +128,7 @@ def analyze(request: AnalyzeRequest) -> dict:
                     candidate_lines,
                     model,
                     include_attention=request.attention,
+                    forcing_line_text=forcing_text,
                 )
             except RuntimeError as exc:
                 llm_error = str(exc)
@@ -165,6 +171,7 @@ def chat(request: ChatRequest) -> dict:
     history = [message_to_dict(msg) for msg in request.history]
 
     hypothetical_lines: list = []
+    forcing_text = None
     engine_path = ct.find_engine_path(None)
     if engine_path:
         try:
@@ -183,6 +190,10 @@ def chat(request: ChatRequest) -> dict:
                     pv_plies=8,
                     max_lines=4,
                 )
+                try:
+                    forcing_text = ct.explain_forcing_line(board, ct.forcing_line(board, engine))
+                except Exception:
+                    forcing_text = None
         except Exception:
             hypothetical_lines = []
 
@@ -197,6 +208,7 @@ def chat(request: ChatRequest) -> dict:
             model,
             hypothetical_lines=hypothetical_lines,
             include_attention=request.attention,
+            forcing_line_text=forcing_text,
         )
         error = None
     except RuntimeError as exc:
