@@ -17,6 +17,7 @@ import verify_explanations as v
 from chess_teacher import (
     LineResult,
     _near_equal_alt,
+    _faithfulness_violations,
     _why_move_question,
     defense_relations,
     describe_best_move,
@@ -112,6 +113,23 @@ def test_named_pattern_definition_is_available_to_model():
     assert "knight + rook" in block  # the correct definition, not a hallucination
 
 
+def test_faithfulness_guard_flags_hallucinations_and_passes_truth():
+    # The runtime guard must catch the classes we saw the LLM invent, and NOT flag
+    # correct prose. Position: Anastasia mate (White Ra5, Ne7, Kg1 vs Black Kh7, Pg7).
+    b = chess.Board("8/4N1pk/8/R7/8/8/8/6K1 w - - 0 1")
+    lines = [LineResult("e1", ["Rh5"], {"mate": 1}, [], "engine")]
+    # false 'A attacks B' (a5 rook does not hit h7)
+    assert _faithfulness_violations(b, "The rook on a5 attacks the king on h7 and mates.", lines, "")
+    # piece on an empty square
+    assert _faithfulness_violations(b, "The bishop on d4 controls the long diagonal in this position.", lines, "")
+    # invented move
+    assert _faithfulness_violations(b, "White should simply play Qxf7 and win the game from here.", lines, "")
+    # true, faithful prose passes clean
+    clean = ("The best move is Rh5#, checkmate. The knight on e7 covers g6 and g8 "
+             "while the rook mates on the h-file \u2014 Anastasia's mate.")
+    assert _faithfulness_violations(b, clean, lines, "") == []
+
+
 def test_verdict_names_the_pin_behind_a_losing_capture():
     # The verdict must NAME the concept (pin), not just recite the line: Nxe5 loses
     # because the f3 knight is pinned to the queen by Bg4.
@@ -156,5 +174,6 @@ if __name__ == "__main__":
     test_named_pattern_definition_is_available_to_model()
     test_why_cant_i_play_is_a_verdict_not_a_why_good_question()
     test_verdict_names_the_pin_behind_a_losing_capture()
+    test_faithfulness_guard_flags_hallucinations_and_passes_truth()
     test_concept_layer_faithful_on_sample_positions()
     print("all explanation-faithfulness tests passed")

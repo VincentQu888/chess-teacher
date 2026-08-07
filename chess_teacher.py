@@ -676,6 +676,31 @@ def attack_relations(board: chess.Board) -> List[str]:
     return rels
 
 
+def piece_vision_summary(board: chess.Board) -> List[str]:
+    """Exhaustive, literal square-control map: for EVERY piece, the exact squares it
+    attacks ('sees'), with any enemy pieces on those squares called out. This is the
+    complete vision ground truth, so the model never has to guess which piece sees
+    what (e.g. that a rook on a5 does NOT see h7 until it moves to the h-file)."""
+    rels: List[str] = []
+    for sq in chess.SQUARES:
+        p = board.piece_at(sq)
+        if not p:
+            continue
+        seen = sorted(board.attacks(sq),
+                      key=lambda s: (chess.square_rank(s), chess.square_file(s)))
+        if not seen:
+            continue
+        squares = " ".join(chess.square_name(s) for s in seen)
+        hits = [f"{board.piece_at(s).symbol().upper()}{chess.square_name(s)}"
+                for s in seen if board.piece_at(s) and board.piece_at(s).color != p.color]
+        tail = f"  [enemy pieces hit: {', '.join(hits)}]" if hits else ""
+        rels.append(
+            f"{cname(p.color)} {chess.piece_name(p.piece_type)} on {chess.square_name(sq)} "
+            f"attacks: {squares}{tail}"
+        )
+    return rels
+
+
 def defense_relations(board: chess.Board) -> List[str]:
     """For each piece that is CURRENTLY ATTACKED by an enemy piece, list which
     friendly pieces defend it. Defense only matters when there is an attack to meet,
@@ -1575,6 +1600,7 @@ def build_ground_truth_block(board: chess.Board, include_attention: bool = True)
     placement = piece_placement_summary(board)
     meta_text = bullets(position_meta(board), "(no special state)")
     attacks_text = bullets(attack_relations(board), "no pieces currently attack any enemy piece")
+    vision_text = bullets(piece_vision_summary(board), "(no pieces)")
     defenses_text = bullets(defense_relations(board), "no pieces currently defend a friendly piece")
     pins_text = bullets(pin_descriptions(board), "no pieces are pinned")
     forks_text = bullets(existing_forks(board), "no pieces currently fork enemy targets")
@@ -1586,6 +1612,8 @@ def build_ground_truth_block(board: chess.Board, include_attention: bool = True)
         f"Board state:\n{placement}\n\n"
         f"Position meta (check, castling, en passant, material):\n{meta_text}\n\n"
         f"Piece attacks (each piece → enemy pieces it currently attacks):\n{attacks_text}\n\n"
+        f"Square control (each piece → EVERY square it attacks; this is the complete, "
+        f"literal list — a piece sees ONLY these squares):\n{vision_text}\n\n"
         f"Piece defenses (each piece → friendly pieces defending it):\n{defenses_text}\n\n"
         f"Pinned pieces:\n{pins_text}\n\n"
         f"Existing forks on the board:\n{forks_text}\n\n"
@@ -2257,6 +2285,197 @@ def _try_move_verdict(
     return format_move_verdict(board, match, engine_lines)
 
 
+def _verified_answer(board: chess.Board, question: str,
+                     engine_lines: List[LineResult],
+                     extra_lines: List[LineResult]) -> Optional[str]:
+    """The deterministic, engine+detector-grounded answer for a move question (why a
+    move is good, a 'why not X' verdict, or the best move), or None if the question
+    isn't a specific-move question. This is CORRECT by construction and is used both
+    as the LLM's authoritative input and as the guaranteed fallback."""
+    if _why_move_question(board, question):
+        pm = find_prompt_moves(question, board)
+        best_san = engine_lines[0].moves[0] if engine_lines and engine_lines[0].moves else None
+        mv_san = pm[0] if pm else best_san
+        # Positive 'why it's good' only when the named move IS the best move; any other
+        # named move defers to the verdict so we never rationalize a blunder.
+        if mv_san and (not pm or mv_san == best_san):
+            why = describe_why_move(board, mv_san, engine_lines)
+            if why:
+                return why
+    verdict = _try_move_verdict(board, question, engine_lines, extra_lines, "")
+    if verdict is not None:
+        return verdict
+    if _best_move_question(question) and engine_lines:
+        bm = describe_best_move(board, engine_lines)
+        if bm is not None:
+            return bm
+    return None
+
+
+def _allowed_move_tokens(board: chess.Board, lines: List[LineResult],
+                         verified: str) -> set:
+    """Every move the LLM is allowed to name: legal SANs in the position, plus moves
+    that appear in the supplied engine/candidate lines and the verified analysis.
+    Normalised (check/mate/annotation suffixes stripped)."""
+    def norm(s: str) -> str:
+        return s.rstrip("+#!?")
+    allowed = {norm(board.san(m)) for m in board.legal_moves}
+    for l in lines or []:
+        for mv in (l.moves or []):
+            allowed.add(norm(mv))
+    for tok in _MOVE_TOKEN_RE.findall(verified or ""):
+        allowed.add(norm(tok))
+    return allowed
+
+
+_PIECE_WORD_TO_TYPE = {
+    "pawn": chess.PAWN, "knight": chess.KNIGHT, "bishop": chess.BISHOP,
+    "rook": chess.ROOK, "queen": chess.QUEEN, "king": chess.KING,
+}
+_PIECE_LETTER_TO_TYPE = {
+    "N": chess.KNIGHT, "B": chess.BISHOP, "R": chess.ROOK,
+    "Q": chess.QUEEN, "K": chess.KING,
+}
+_PIECE_ON_SQ_CLAIM = re.compile(
+    r"\b(white|black)?\s*(pawn|knight|bishop|rook|queen|king)\s+on\s+([a-h][1-8])\b")
+_ATTACK_CLAIM = re.compile(
+    r"\bon\s+([a-h][1-8])\b[^.;\n]{0,60}?"
+    r"\b(?:attacks?|attacking|controls?|controlling|hits?|targets?|covers?|defends?|defending)\b"
+    r"[^.;\n]{0,40}?\b([a-h][1-8])\b")
+_SIMPLE_PIECE_MOVE = re.compile(r"^([NBRQK])([a-h][1-8])$")
+
+
+def _faithfulness_violations(board: chess.Board, text: str,
+                             lines: List[LineResult], verified: str) -> List[str]:
+    """Specific, human-readable ways ``text`` contradicts the board, for the claim
+    classes we can check reliably:
+      * invented moves (a move token not legal here and not in the supplied lines),
+      * wrong piece type/colour on a square ('White pawn on g7' when g7 is Black's),
+      * false 'the piece on A attacks/controls B' relations (A does not see B).
+    Empty list => faithful on these classes. Drives the reject/repair guard."""
+    if not text or len(text.strip()) < 40:
+        return ["the answer is empty or too short"]
+    out: List[str] = []
+    allowed = _allowed_move_tokens(board, lines, verified)
+    for tok in _MOVE_TOKEN_RE.findall(text):
+        core = tok.rstrip("+#!?")
+        if core in allowed:
+            continue
+        # 'Bg4' / 'Rd1' in prose usually means the piece STANDING on that square, not a
+        # move — allow it when a piece of that type is actually there.
+        m = _SIMPLE_PIECE_MOVE.match(core)
+        if m:
+            pc = board.piece_at(chess.parse_square(m.group(2)))
+            if pc and pc.piece_type == _PIECE_LETTER_TO_TYPE[m.group(1)]:
+                continue
+        out.append(f"it names a move that isn't available here: '{tok}'")
+    low = text.lower()
+    for m in _PIECE_ON_SQ_CLAIM.finditer(low):
+        color_word, ptype, sqname = m.group(1), m.group(2), m.group(3)
+        pc = board.piece_at(chess.parse_square(sqname))
+        if pc is None:
+            out.append(f"it says there is a {ptype} on {sqname}, but that square is empty")
+        elif pc.piece_type != _PIECE_WORD_TO_TYPE[ptype]:
+            out.append(f"it calls {sqname} a {ptype}, but {sqname} holds a {chess.piece_name(pc.piece_type)}")
+        elif color_word and pc.color != (chess.WHITE if color_word == "white" else chess.BLACK):
+            out.append(f"it calls the {chess.piece_name(pc.piece_type)} on {sqname} {color_word}, "
+                       f"but it is {cname(pc.color).lower()}'s")
+    for m in _ATTACK_CLAIM.finditer(low):
+        a_sq, b_sq = chess.parse_square(m.group(1)), chess.parse_square(m.group(2))
+        if board.piece_at(a_sq) is None:
+            continue
+        if b_sq not in board.attacks(a_sq):
+            out.append(f"it claims the piece on {m.group(1)} attacks/controls "
+                       f"{m.group(2)}, but it does not")
+    seen = set()
+    uniq = []
+    for v in out:
+        if v not in seen:
+            seen.add(v)
+            uniq.append(v)
+    return uniq
+
+
+def _guarded_generate(board: chess.Board, base_prompt: str, model: str,
+                      lines: List[LineResult], verified: Optional[str] = None,
+                      max_new_tokens: int = 384, temperature: float = 0.3,
+                      tries: int = 3) -> Optional[str]:
+    """Generate, then VERIFY the output against the board. On a checkable false claim,
+    re-prompt with the exact false statements quoted as forbidden (a self-repair loop).
+    Returns the first faithful answer; if every attempt fails, returns ``verified`` when
+    supplied, else None (caller falls back)."""
+    prompt = base_prompt
+    temp = temperature
+    for _ in range(max(1, tries)):
+        try:
+            out = (hf_generate(prompt, model=model, max_new_tokens=max_new_tokens,
+                               temperature=temp) or "").strip()
+        except Exception:
+            break
+        violations = _faithfulness_violations(board, out, lines, verified or "")
+        if not violations:
+            return out
+        vlist = "\n".join(f"- {v}" for v in violations[:6])
+        prompt = (
+            base_prompt
+            + "\n\nYOUR PREVIOUS DRAFT CONTAINED STATEMENTS THAT CONTRADICT THE BOARD:\n"
+            + vlist
+            + "\n\nRewrite the answer so NONE of these appear and every claim matches the "
+            "facts given above. Do not introduce any new move, piece, or relationship."
+        )
+        temp = max(0.0, temp - 0.1)
+    return verified
+
+
+def _enrich_verified(board: chess.Board, question: str, verified: str,
+                     engine_lines: List[LineResult], candidate_lines: List[LineResult],
+                     model: str, include_attention: bool = True) -> str:
+    """Hand the VERIFIED analysis to the LLM to phrase naturally and add only verified
+    positional context. Guard the result; fall back to the verified text on any
+    failure so correctness never regresses."""
+    try:
+        ground_truth = build_ground_truth_block(board, include_attention)
+        engine_text = "\n".join(
+            f"{i + 1}) {format_score(l.score)}: {format_moves_with_sides(board, l.moves)}"
+            for i, l in enumerate(engine_lines)
+        )
+        enrich_prompt = (
+            "You are a chess coach explaining to a student. Below is a VERIFIED, correct "
+            "analysis (from a strong engine plus verified pattern detectors). Rewrite it "
+            "into a clear, natural explanation that DIRECTLY answers the question.\n"
+            "RULES (strict \u2014 you will be checked against the board):\n"
+            "- Base every factual claim ONLY on the VERIFIED ANALYSIS and the ground "
+            "truth below. If a detail is not stated there, do NOT state it.\n"
+            "- A piece's colour, type and square must match 'Board state' exactly. Never "
+            "say a pawn/piece belongs to a side unless Board state shows it (e.g. do not "
+            "call a Black pawn White's).\n"
+            "- Only say a piece attacks/controls/defends a square or piece if that appears "
+            "in 'Square control' or 'Piece attacks/defenses'. A piece sees ONLY the "
+            "squares listed for it in 'Square control'.\n"
+            "- Do NOT introduce any move, capture, pin, fork, skewer, checkmate, passed "
+            "pawn, or promotion that is not already in the verified analysis or ground "
+            "truth.\n"
+            "- Keep every evaluation, move, result, and named pattern exactly as given, "
+            "and explain the WHY using the concept named in the verified analysis (e.g. "
+            "the pin or the mate pattern), defining that pattern briefly if useful.\n"
+            "- Mention at most one short line (<=4 plies). Be concise: 1-3 short "
+            "paragraphs, no headings, and never mention 'verified analysis', 'ground "
+            "truth', or 'square control'.\n\n"
+            f"Side to move: {cname(board.turn)}\n"
+            f"User question: {question}\n\n"
+            f"=== VERIFIED ANALYSIS (authoritative \u2014 base your answer on this) ===\n{verified}\n\n"
+            f"=== Ground truth (added context only) ===\n{ground_truth}\n\n"
+            f"Engine top lines:\n{engine_text or '(none)'}\n"
+        )
+        out = _guarded_generate(board, enrich_prompt, model,
+                                list(engine_lines) + list(candidate_lines), verified)
+        if out:
+            return out
+    except Exception:
+        pass
+    return verified
+
+
 def llm_explain(
     board: chess.Board,
     prompt: str,
@@ -2265,27 +2484,12 @@ def llm_explain(
     model: str,
     include_attention: bool = True,
 ) -> str:
-    # 'Why is this move good / why trade / what's the idea' -> deterministic why-answer.
-    if _why_move_question(board, prompt):
-        pm = find_prompt_moves(prompt, board)
-        best_san = engine_lines[0].moves[0] if engine_lines and engine_lines[0].moves else None
-        mv_san = pm[0] if pm else best_san
-        # Only give a positive 'why it's good' when the named move really is the best
-        # move. For any other named move, fall through to the engine-grounded verdict
-        # so we never rationalize a blunder (e.g. capturing with a pinned piece).
-        if mv_san and (not pm or mv_san == best_san):
-            why = describe_why_move(board, mv_san, engine_lines)
-            if why:
-                return why
-    # Direct move questions ('why not X', 'is X good') get a deterministic verdict.
-    verdict = _try_move_verdict(board, prompt, engine_lines, candidate_lines, model)
-    if verdict is not None:
-        return verdict
-    # 'What is the best move?' also gets a deterministic, mechanics-correct answer.
-    if _best_move_question(prompt):
-        bm = describe_best_move(board, engine_lines)
-        if bm is not None:
-            return bm
+    # Move questions: get the VERIFIED analysis, then let the LLM phrase it richly with
+    # a faithfulness guard + fallback (no more terse deterministic short-circuit).
+    verified = _verified_answer(board, prompt, engine_lines, candidate_lines)
+    if verified is not None:
+        return _enrich_verified(board, prompt, verified, engine_lines,
+                                candidate_lines, model, include_attention)
     illegal = _illegal_move_note(board, prompt)
     if illegal is not None:
         return illegal
@@ -2367,44 +2571,12 @@ def llm_explain(
         candidates=candidate_text or "(none)",
     )
 
-    response = hf_generate(expl_prompt, model=model, max_new_tokens=384, temperature=0.3)
-    if response_needs_rewrite(response):
-        rewrite_prompt = (
-            "Rewrite the answer so it DIRECTLY answers the user's question below, "
-            "in 2-4 sentences.\n\n"
-            "Do not list or enumerate move lines or tags.\n"
-            "Lead with a direct answer to the question; do not default to describing "
-            "the engine's best move unless the question asks what to play or why a move "
-            "is best. Do not invent moves.\n"
-            "Reference (engine top choice, cite only if relevant): {anchor}\n"
-            "Do not claim attacks, defenses, pins, forks, or piece placements that "
-            "aren't in the Ground truth sections. Only name an opening if an 'Opening:' "
-            "line is given.\n"
-            "No headings.\n\n"
-            "Position FEN: {fen}\n"
-            "Side to move: {side}\n"
-            "User question: {question}\n\n"
-            "=== Ground truth ===\n{ground_truth}\n\n"
-            "Engine top lines:\n{engine}\n\n"
-            "Candidate lines with tags:\n{candidates}\n"
-        ).format(
-            anchor=anchor,
-            side=side_name,
-            fen=board.fen(),
-            question=prompt,
-            ground_truth=ground_truth,
-            engine=engine_text or "(none)",
-            candidates=candidate_text or "(none)",
-        )
-        response = hf_generate(
-            rewrite_prompt,
-            model=model,
-            max_new_tokens=256,
-            temperature=0.2,
-        )
-        if response_needs_rewrite(response):
-            return basic_explain(board, prompt, engine_lines, candidate_lines)
-
+    # Generate with the faithfulness guard + self-repair loop; fall back to the
+    # deterministic factual summary if the model can't produce a faithful answer.
+    response = _guarded_generate(board, expl_prompt, model,
+                                 list(engine_lines) + list(candidate_lines), verified=None)
+    if not response or response_needs_rewrite(response):
+        return basic_explain(board, prompt, engine_lines, candidate_lines)
     return response
 
 
@@ -2419,29 +2591,12 @@ def llm_followup(
     hypothetical_lines: Optional[List[LineResult]] = None,
     include_attention: bool = True,
 ) -> str:
-    # 'Why is this move good / why trade / what's the idea' -> deterministic why-answer.
-    if _why_move_question(board, question):
-        pm = find_prompt_moves(question, board)
-        best_san = engine_lines[0].moves[0] if engine_lines and engine_lines[0].moves else None
-        mv_san = pm[0] if pm else best_san
-        # Only give a positive 'why it's good' when the named move really is the best
-        # move. For any other named move, fall through to the engine-grounded verdict
-        # so we never rationalize a blunder (e.g. capturing with a pinned piece).
-        if mv_san and (not pm or mv_san == best_san):
-            why = describe_why_move(board, mv_san, engine_lines)
-            if why:
-                return why
-    # Direct move questions get the deterministic, hallucination-proof verdict.
-    verdict = _try_move_verdict(
-        board, question, engine_lines,
-        list(hypothetical_lines or []) + list(candidate_lines), model,
-    )
-    if verdict is not None:
-        return verdict
-    if _best_move_question(question) and engine_lines:
-        bm = describe_best_move(board, engine_lines)
-        if bm is not None:
-            return bm
+    # Move questions: VERIFIED analysis -> LLM enrichment with guard + fallback.
+    extra = list(hypothetical_lines or []) + list(candidate_lines)
+    verified = _verified_answer(board, question, engine_lines, extra)
+    if verified is not None:
+        return _enrich_verified(board, question, verified, engine_lines, extra,
+                                model, include_attention)
     illegal = _illegal_move_note(board, question)
     if illegal is not None:
         return illegal
@@ -2524,47 +2679,12 @@ def llm_followup(
         hypotheticals=hypothetical_text or "(none)",
     )
 
-    response = hf_generate(follow_prompt, model=model, max_new_tokens=384, temperature=0.3)
-    if response_needs_rewrite(response):
-        rewrite_prompt = (
-            "Rewrite the answer into a concise explanation.\n\n"
-            "{anchor}\n\n"
-            "Do not list or enumerate move lines or tags.\n"
-            "Use 2-4 sentences. Mention at most one key line (up to 4 plies).\n"
-            "Do not invent moves, attacks, defenses, pins, forks, or piece placements; "
-            "every concrete claim must trace back to the Ground truth sections.\n"
-            "When relevant, include one positional theme drawn from the Strategic facts.\n"
-            "No headings.\n\n"
-            "Position FEN: {fen}\n"
-            "Side to move: {side}\n"
-            "Original question: {prompt}\n"
-            "Conversation so far:\n{history}\n\n"
-            "Follow-up question: {question}\n\n"
-            "=== Ground truth ===\n{ground_truth}\n\n"
-            "Engine top lines:\n{engine}\n\n"
-            "Candidate lines with tags:\n{candidates}\n\n"
-            "Hypothetical lines:\n{hypotheticals}\n"
-        ).format(
-            anchor=anchor,
-            side=side_name,
-            fen=board.fen(),
-            prompt=prompt,
-            history=history_text,
-            question=question,
-            ground_truth=ground_truth,
-            engine=engine_text or "(none)",
-            candidates=candidate_text or "(none)",
-            hypotheticals=hypothetical_text or "(none)",
-        )
-        response = hf_generate(
-            rewrite_prompt,
-            model=model,
-            max_new_tokens=192,
-            temperature=0.2,
-        )
-        if response_needs_rewrite(response):
-            return basic_explain(board, question, engine_lines, candidate_lines)
-
+    # Generate with the faithfulness guard + self-repair loop; fall back to the
+    # deterministic factual summary if the model can't produce a faithful answer.
+    allowed = list(hypothetical_lines or []) + list(engine_lines) + list(candidate_lines)
+    response = _guarded_generate(board, follow_prompt, model, allowed, verified=None)
+    if not response or response_needs_rewrite(response):
+        return basic_explain(board, question, engine_lines, candidate_lines)
     return response
 
 
