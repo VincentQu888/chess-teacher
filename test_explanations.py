@@ -155,6 +155,22 @@ def test_why_cant_i_play_is_a_verdict_not_a_why_good_question():
     assert _why_move_question(b, "why is this trade good?") is True
 
 
+def test_opening_id_says_dont_know_when_not_in_eco():
+    import chess_concepts as cc
+    from chess_teacher import _is_opening_question, _opening_answer
+    # A non-book middlegame (the Dutch-ish ...f5 setup that was mislabelled 'Indian').
+    b = chess.Board("r2q1rk1/pbpn2pp/1p1ppn2/5pB1/1PPP4/2QBPN2/P4PPP/R4RK1 b - - 0 11")
+    assert cc.detect_opening(b) == [], "must not guess an opening for a non-book position"
+    assert _is_opening_question("what opening does this position come out of")
+    ans = _opening_answer(b).lower()
+    assert "can't identify" in ans or "won't guess" in ans
+    assert "indian" not in ans and "1.d4" not in ans  # no fabricated name/move order
+    # A real book position IS identified.
+    book = chess.Board("rnbqkb1r/pppp1ppp/5n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 4 3")
+    assert cc.detect_opening(book), "exact ECO book position should be identified"
+    assert "book line" in _opening_answer(book).lower()
+
+
 def test_concept_layer_faithful_on_sample_positions():
     for fen in [
         REPORTED_FEN,
@@ -175,5 +191,6 @@ if __name__ == "__main__":
     test_why_cant_i_play_is_a_verdict_not_a_why_good_question()
     test_verdict_names_the_pin_behind_a_losing_capture()
     test_faithfulness_guard_flags_hallucinations_and_passes_truth()
+    test_opening_id_says_dont_know_when_not_in_eco()
     test_concept_layer_faithful_on_sample_positions()
     print("all explanation-faithfulness tests passed")

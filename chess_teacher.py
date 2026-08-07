@@ -2476,6 +2476,28 @@ def _enrich_verified(board: chess.Board, question: str, verified: str,
     return verified
 
 
+def _is_opening_question(q: str) -> bool:
+    ql = q.lower()
+    return any(k in ql for k in (
+        "what opening", "which opening", "what's this opening", "whats this opening",
+        "what variation", "which variation", "name the opening", "what line is this",
+        "is this a known opening", "what is this position from",
+        "where does this position come from", "come out of", "eco",
+    ))
+
+
+def _opening_answer(board: chess.Board) -> str:
+    """Honest opening identification: state the exact ECO book line if the position is
+    in the book, otherwise say we can't identify it. Never a structural guess (which
+    fabricated move orders and mislabelled e.g. a Dutch ...f5 setup as an Indian)."""
+    eco = _concepts._eco_lookup(board) if _concepts is not None else None
+    if eco:
+        return f"This position is a known book line: {eco} (ECO)."
+    return ("I can't identify a specific opening from this position \u2014 it isn't in my "
+            "opening book (we're past book theory, or it's a transposition I don't have), "
+            "so I won't guess a name.")
+
+
 def llm_explain(
     board: chess.Board,
     prompt: str,
@@ -2484,6 +2506,10 @@ def llm_explain(
     model: str,
     include_attention: bool = True,
 ) -> str:
+    # Opening-identification questions: answer only from the ECO book, else say we don't
+    # know (deterministic — no structural guessing, no LLM opening-theory hallucination).
+    if _is_opening_question(prompt):
+        return _opening_answer(board)
     # Move questions: get the VERIFIED analysis, then let the LLM phrase it richly with
     # a faithfulness guard + fallback (no more terse deterministic short-circuit).
     verified = _verified_answer(board, prompt, engine_lines, candidate_lines)
@@ -2591,6 +2617,9 @@ def llm_followup(
     hypothetical_lines: Optional[List[LineResult]] = None,
     include_attention: bool = True,
 ) -> str:
+    # Opening-identification questions: ECO book only, else an honest 'I don't know'.
+    if _is_opening_question(question):
+        return _opening_answer(board)
     # Move questions: VERIFIED analysis -> LLM enrichment with guard + fallback.
     extra = list(hypothetical_lines or []) + list(candidate_lines)
     verified = _verified_answer(board, question, engine_lines, extra)

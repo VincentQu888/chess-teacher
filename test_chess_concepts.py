@@ -174,7 +174,7 @@ CONCEPT_TESTS = {
     "Compensation": ("r1bqk2r/pppp1ppp/2n2n2/8/2B1P3/8/PP3PPP/RNBQK2R b KQkq - 0 6", None),
 
     # Opening identity
-    "Opening": ("r1bqk2r/pp1pppbp/2n2np1/8/3NP3/2N1B3/PPP2PPP/R2QKB1R w KQkq - 4 7", None),
+    "Opening": ("rnbqkb1r/pppp1ppp/5n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 4 3", None),
 
     # 11. Meta
     "Dynamic vs static advantages": ("4k3/8/8/3P4/8/8/8/R3K2R w KQ - 0 1", None),

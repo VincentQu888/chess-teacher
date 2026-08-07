@@ -2009,15 +2009,18 @@ def _eco_lookup(board: chess.Board):
 
 
 def detect_opening(board: chess.Board) -> List[Concept]:
-    """Identify the opening. Prefer an exact ECO book match (precise code + name),
-    else fall back to a conservative structural family detector."""
+    """Identify the opening ONLY from an exact ECO book match (precise code + name).
+    If the position isn't in the book, return nothing rather than guessing a family:
+    the structural heuristic fabricated move orders (e.g. 'Indian Defence (1.d4 Nf6)'
+    for a position that actually had ...f5), which the explainer would then repeat and
+    embellish. When there is no match the explainer honestly says it can't identify it."""
     if board.fullmove_number > 40:
         return []
     eco = _eco_lookup(board)
     if eco:
         return [Concept("Opening", "openingid",
                         f"this is a known book position: {eco} (ECO)")]
-    return _structural_opening(board)
+    return []
 
 
 def _structural_opening(board: chess.Board) -> List[Concept]:
